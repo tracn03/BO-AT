@@ -84,7 +84,6 @@ export default function MissionPlanner() {
   const removeWaypoint = (id: string) => {
     setWaypoints(prevWaypoints => {
       const filtered = prevWaypoints.filter(wp => wp.id !== id);
-      // Reorder remaining waypoints
       const reordered = filtered.map((wp, index) => ({
         ...wp,
         order: index + 1

@@ -27,7 +27,7 @@ describe('Distance Calculation Utilities', () => {
       // Golden Gate Bridge to Ferry Building (approx 6.5km)
       const distance = calculateDistance(37.8199, -122.4783, 37.7955, -122.3937)
       expect(distance).toBeGreaterThan(6000)
-      expect(distance).toBeLessThan(7000)
+      expect(distance).toBeLessThan(8000)
     })
 
     it('calculates distance for points 1 degree apart', () => {

@@ -28,19 +28,16 @@ export default function MapComponent({ waypoints, onMapClick, onWaypointRemove }
   useEffect(() => {
     if (!mapContainerRef.current || mapRef.current) return;
 
-    // Create map centered on San Francisco (based on the screenshot)
     const map = L.map(mapContainerRef.current, {
-      center: [37.7749, -122.4194],
+      center: [42.36, -71.06], //map center
       zoom: 13,
       zoomControl: true
     });
 
-    // Add OpenStreetMap tiles
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
     }).addTo(map);
 
-    // Add click handler
     map.on('click', (e) => {
       onMapClick(e.latlng.lat, e.latlng.lng);
     });
@@ -53,7 +50,6 @@ export default function MapComponent({ waypoints, onMapClick, onWaypointRemove }
     };
   }, []);
 
-  // Calculate distance between two points in meters
   const calculateDistance = (lat1: number, lng1: number, lat2: number, lng2: number) => {
     const R = 6371e3; // Earth's radius in meters
     const φ1 = lat1 * Math.PI / 180;
@@ -69,7 +65,6 @@ export default function MapComponent({ waypoints, onMapClick, onWaypointRemove }
     return R * c;
   };
 
-  // Update waypoints on map
   useEffect(() => {
     if (!mapRef.current) return;
 
@@ -95,7 +90,6 @@ export default function MapComponent({ waypoints, onMapClick, onWaypointRemove }
 
     // Add new markers
     waypoints.forEach((wp, index) => {
-      // Determine marker color - first is green, last is red, others are blue
       let markerColor = '#3b82f6'; // Blue
       if (index === 0 && waypoints.length > 1) {
         markerColor = '#10b981'; // Green for start
@@ -103,7 +97,6 @@ export default function MapComponent({ waypoints, onMapClick, onWaypointRemove }
         markerColor = '#ef4444'; // Red for end
       }
 
-      // Create custom icon with waypoint number
       const icon = L.divIcon({
         className: 'custom-waypoint-marker',
         html: `
@@ -199,11 +192,9 @@ export default function MapComponent({ waypoints, onMapClick, onWaypointRemove }
       markersRef.current[wp.id] = marker;
     });
 
-    // Draw main polyline connecting waypoints
     if (waypoints.length > 1) {
       const coordinates = waypoints.map(wp => [wp.lat, wp.lng] as [number, number]);
       
-      // Main route line - solid and more prominent
       polylineRef.current = L.polyline(coordinates, {
         color: '#3b82f6',
         weight: 4,
@@ -212,19 +203,15 @@ export default function MapComponent({ waypoints, onMapClick, onWaypointRemove }
         lineCap: 'round'
       }).addTo(map);
 
-      // Add directional arrows along the route
       for (let i = 0; i < coordinates.length - 1; i++) {
         const start = coordinates[i];
         const end = coordinates[i + 1];
         
-        // Calculate midpoint for arrow
         const midLat = (start[0] + end[0]) / 2;
         const midLng = (start[1] + end[1]) / 2;
         
-        // Calculate angle for arrow direction
         const angle = Math.atan2(end[1] - start[1], end[0] - start[0]) * 180 / Math.PI;
         
-        // Create small arrow marker
         const arrowIcon = L.divIcon({
           className: 'route-arrow',
           html: `
@@ -255,7 +242,6 @@ export default function MapComponent({ waypoints, onMapClick, onWaypointRemove }
       map.fitBounds(bounds, { padding: [50, 50] });
     }
 
-    // Make remove function available globally for popup buttons
     (window as any).removeWaypoint = onWaypointRemove;
 
     return () => {
