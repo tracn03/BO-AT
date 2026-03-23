@@ -2,7 +2,8 @@
 
 import { useState } from 'react';
 import dynamic from 'next/dynamic';
-import { Play, Navigation, Battery, Wind, Gauge, Thermometer } from 'lucide-react';
+import { Play, Navigation, Battery, Wind, Gauge, Thermometer, Save, Download } from 'lucide-react';
+import { saveMission, exportMissionFile } from '@/lib/missionApi';
 
 // Dynamically import the map component to avoid SSR issues
 const MapComponent = dynamic(() => import('./components/MapComponent'), {
@@ -31,6 +32,11 @@ interface Metrics {
 export default function MissionPlanner() {
   const [waypoints, setWaypoints] = useState<Waypoint[]>([]);
   const [status, setStatus] = useState<'idle' | 'running' | 'completed'>('idle');
+  const [savedMissionId, setSavedMissionId] = useState<number | null>(null);
+  const [missionName, setMissionName] = useState('My Mission');
+  const [isSaving, setIsSaving] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
+  const [apiError, setApiError] = useState<string | null>(null);
   const [metrics, setMetrics] = useState<Metrics>({
     battery: 85,
     windSpeed: 12,
@@ -69,9 +75,41 @@ export default function MissionPlanner() {
     }
   };
 
+  const handleSaveMission = async () => {
+    if (waypoints.length === 0) return;
+    setIsSaving(true);
+    setApiError(null);
+    try {
+      const mission = await saveMission({
+        name: missionName,
+        waypoints: waypoints.map(wp => ({ latitude: wp.lat, longitude: wp.lng })),
+      });
+      setSavedMissionId(mission.id);
+    } catch (err) {
+      setApiError(err instanceof Error ? err.message : 'Save failed');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleExport = async () => {
+    if (savedMissionId === null) return;
+    setIsExporting(true);
+    setApiError(null);
+    try {
+      await exportMissionFile(savedMissionId, `${missionName.replace(/\s+/g, '_').toLowerCase()}.waypoints`);
+    } catch (err) {
+      setApiError(err instanceof Error ? err.message : 'Export failed');
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
   const handleReset = () => {
     setWaypoints([]);
     setStatus('idle');
+    setSavedMissionId(null);
+    setApiError(null);
     setMetrics({
       battery: 85,
       windSpeed: 12,
@@ -144,6 +182,43 @@ export default function MissionPlanner() {
                 </svg>
                 Reset
               </button>
+
+              {/* Mission name + Save / Export */}
+              <div className="mt-4 space-y-2">
+                <input
+                  type="text"
+                  value={missionName}
+                  onChange={e => { setMissionName(e.target.value); setSavedMissionId(null); }}
+                  placeholder="Mission name"
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-400"
+                />
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={handleSaveMission}
+                    disabled={waypoints.length === 0 || isSaving}
+                    className="bg-blue-500 hover:bg-blue-600 disabled:bg-slate-300 text-white font-semibold py-2 px-3 rounded-lg text-sm transition-colors duration-200 flex items-center justify-center gap-1"
+                  >
+                    <Save className="w-4 h-4" />
+                    {isSaving ? 'Saving…' : 'Save'}
+                  </button>
+                  <button
+                    onClick={handleExport}
+                    disabled={savedMissionId === null || isExporting}
+                    className="bg-emerald-500 hover:bg-emerald-600 disabled:bg-slate-300 text-white font-semibold py-2 px-3 rounded-lg text-sm transition-colors duration-200 flex items-center justify-center gap-1"
+                  >
+                    <Download className="w-4 h-4" />
+                    {isExporting ? 'Exporting…' : 'Export'}
+                  </button>
+                </div>
+                {savedMissionId !== null && (
+                  <p className="text-xs text-emerald-600 font-medium">
+                    Saved as mission #{savedMissionId} — ready to export
+                  </p>
+                )}
+                {apiError && (
+                  <p className="text-xs text-red-500">{apiError}</p>
+                )}
+              </div>
 
               <div className="grid grid-cols-2 gap-4 mt-4">
                 <div>
