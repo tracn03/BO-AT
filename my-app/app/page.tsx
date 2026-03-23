@@ -1,9 +1,46 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import dynamic from 'next/dynamic';
-import { Play, Navigation, Battery, Wind, Gauge, Thermometer, Save, Download } from 'lucide-react';
+import { Play, Navigation, Battery, Wind, Gauge, Save, Download } from 'lucide-react';
 import { saveMission, exportMissionFile } from '@/lib/missionApi';
+
+const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? 'ws://localhost:8000/api/telemetry/ws';
+
+interface TelemetryData {
+  connected: boolean;
+  wind_speed_knots: number | null;
+  wind_direction_deg: number | null;
+  timestamp: number | null;
+}
+
+/** Converts degrees to 16-point compass label (e.g. 45 → "NE"). */
+function compassLabel(deg: number): string {
+  const labels = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+  return labels[Math.round(deg / 22.5) % 16];
+}
+
+/** SVG arrow indicating wind direction (the direction wind is coming FROM). */
+function WindCompass({ deg }: { deg: number }) {
+  return (
+    <svg viewBox="0 0 64 64" className="w-12 h-12" aria-label={`Wind from ${deg}°`}>
+      {/* Outer ring */}
+      <circle cx="32" cy="32" r="30" fill="none" stroke="#bfdbfe" strokeWidth="2" />
+      {/* Cardinal labels */}
+      <text x="32" y="8"  textAnchor="middle" fontSize="7" fill="#60a5fa" fontWeight="bold">N</text>
+      <text x="32" y="61" textAnchor="middle" fontSize="7" fill="#60a5fa">S</text>
+      <text x="5"  y="35" textAnchor="middle" fontSize="7" fill="#60a5fa">W</text>
+      <text x="59" y="35" textAnchor="middle" fontSize="7" fill="#60a5fa">E</text>
+      {/* Arrow — rotated to point toward the direction wind comes FROM */}
+      <g transform={`rotate(${deg}, 32, 32)`}>
+        {/* Arrowhead pointing up (N = 0°) */}
+        <polygon points="32,10 28,26 32,22 36,26" fill="#2563eb" />
+        {/* Tail */}
+        <line x1="32" y1="22" x2="32" y2="50" stroke="#93c5fd" strokeWidth="2" strokeLinecap="round" />
+      </g>
+    </svg>
+  );
+}
 
 // Dynamically import the map component to avoid SSR issues
 const MapComponent = dynamic(() => import('./components/MapComponent'), {
@@ -22,13 +59,6 @@ interface Waypoint {
   order: number;
 }
 
-interface Metrics {
-  battery: number;
-  windSpeed: number;
-  speed: number;
-  temperature: number;
-}
-
 export default function MissionPlanner() {
   const [waypoints, setWaypoints] = useState<Waypoint[]>([]);
   const [status, setStatus] = useState<'idle' | 'running' | 'completed'>('idle');
@@ -37,12 +67,46 @@ export default function MissionPlanner() {
   const [isSaving, setIsSaving] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
-  const [metrics, setMetrics] = useState<Metrics>({
-    battery: 85,
-    windSpeed: 12,
-    speed: 0,
-    temperature: 72
+  const [telemetry, setTelemetry] = useState<TelemetryData>({
+    connected: false,
+    wind_speed_knots: null,
+    wind_direction_deg: null,
+    timestamp: null,
   });
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    function connect() {
+      const ws = new WebSocket(WS_URL);
+      wsRef.current = ws;
+
+      ws.onmessage = (event) => {
+        try {
+          setTelemetry(JSON.parse(event.data) as TelemetryData);
+        } catch {
+          // ignore malformed frames
+        }
+      };
+
+      ws.onclose = () => {
+        setTelemetry(prev => ({ ...prev, connected: false }));
+        // Auto-reconnect after 3 s
+        reconnectTimer.current = setTimeout(connect, 3000);
+      };
+
+      ws.onerror = () => {
+        ws.close();
+      };
+    }
+
+    connect();
+
+    return () => {
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+      wsRef.current?.close();
+    };
+  }, []);
 
   const handleMapClick = (lat: number, lng: number) => {
     setWaypoints(prevWaypoints => {
@@ -61,17 +125,6 @@ export default function MissionPlanner() {
   const handleStartMission = () => {
     if (waypoints.length > 0) {
       setStatus('running');
-      // Simulate mission running with changing metrics
-      const interval = setInterval(() => {
-        setMetrics(prev => ({
-          battery: Math.max(0, prev.battery - 0.5),
-          windSpeed: Math.max(0, prev.windSpeed + (Math.random() - 0.5) * 2),
-          speed: Math.min(25, Math.max(0, prev.speed + (Math.random() - 0.3) * 3)),
-          temperature: prev.temperature + (Math.random() - 0.5) * 0.5
-        }));
-      }, 1000);
-
-      return () => clearInterval(interval);
     }
   };
 
@@ -110,12 +163,6 @@ export default function MissionPlanner() {
     setStatus('idle');
     setSavedMissionId(null);
     setApiError(null);
-    setMetrics({
-      battery: 85,
-      windSpeed: 12,
-      speed: 0,
-      temperature: 72
-    });
     console.log('Reset all waypoints');
   };
 
@@ -301,8 +348,15 @@ export default function MissionPlanner() {
 
             {/* Metrics */}
             <div>
-              <h3 className="text-lg font-bold text-slate-800 mb-3">Metrics</h3>
-              
+              <h3 className="text-lg font-bold text-slate-800 mb-1">Metrics</h3>
+              {/* Radio connection status */}
+              <div className="flex items-center gap-1.5 mb-3">
+                <span className={`w-2 h-2 rounded-full ${telemetry.connected ? 'bg-emerald-500 animate-pulse' : 'bg-red-400'}`} />
+                <span className="text-xs text-slate-500">
+                  {telemetry.connected ? 'SiK radio connected' : 'Radio disconnected'}
+                </span>
+              </div>
+
               <div className="grid grid-cols-2 gap-3">
                 {/* Battery */}
                 <div className="bg-gradient-to-br from-emerald-50 to-emerald-100 rounded-lg p-4 border border-emerald-200">
@@ -312,18 +366,10 @@ export default function MissionPlanner() {
                       Battery
                     </span>
                   </div>
-                  <div className="text-3xl font-bold text-emerald-700">
-                    {Math.round(metrics.battery)}%
-                  </div>
-                  <div className="mt-2 h-1.5 bg-emerald-200 rounded-full overflow-hidden">
-                    <div 
-                      className="h-full bg-emerald-500 transition-all duration-300"
-                      style={{ width: `${metrics.battery}%` }}
-                    />
-                  </div>
+                  <div className="text-3xl font-bold text-emerald-700">—</div>
                 </div>
 
-                {/* Wind Speed */}
+                {/* Wind Speed — live from QS-FS sensor via Pixhawk */}
                 <div className="bg-gradient-to-br from-blue-50 to-blue-100 rounded-lg p-4 border border-blue-200">
                   <div className="flex items-center gap-2 mb-2">
                     <Wind className="w-4 h-4 text-blue-600" />
@@ -332,12 +378,13 @@ export default function MissionPlanner() {
                     </span>
                   </div>
                   <div className="text-3xl font-bold text-blue-700">
-                    {metrics.windSpeed.toFixed(1)}
-                    <span className="text-lg ml-1">kts</span>
+                    {telemetry.wind_speed_knots !== null
+                      ? <>{telemetry.wind_speed_knots.toFixed(1)}<span className="text-lg ml-1">kts</span></>
+                      : <span className="text-slate-400">—</span>}
                   </div>
                 </div>
 
-                {/* Speed */}
+                {/* Boat Speed */}
                 <div className="bg-gradient-to-br from-purple-50 to-purple-100 rounded-lg p-4 border border-purple-200">
                   <div className="flex items-center gap-2 mb-2">
                     <Gauge className="w-4 h-4 text-purple-600" />
@@ -345,23 +392,32 @@ export default function MissionPlanner() {
                       Speed
                     </span>
                   </div>
-                  <div className="text-3xl font-bold text-purple-700">
-                    {metrics.speed.toFixed(1)}
-                    <span className="text-lg ml-1">kts</span>
-                  </div>
+                  <div className="text-3xl font-bold text-purple-700">—</div>
                 </div>
 
-                {/* Temperature */}
-                <div className="bg-gradient-to-br from-orange-50 to-orange-100 rounded-lg p-4 border border-orange-200">
+                {/* Wind Direction — live from SN-FXJT05 vane via Pixhawk */}
+                <div className="bg-gradient-to-br from-sky-50 to-sky-100 rounded-lg p-4 border border-sky-200">
                   <div className="flex items-center gap-2 mb-2">
-                    <Thermometer className="w-4 h-4 text-orange-600" />
-                    <span className="text-xs font-semibold text-orange-700 uppercase tracking-wide">
-                      Temp
+                    <Wind className="w-4 h-4 text-sky-600" />
+                    <span className="text-xs font-semibold text-sky-700 uppercase tracking-wide">
+                      Wind Dir
                     </span>
                   </div>
-                  <div className="text-3xl font-bold text-orange-700">
-                    {Math.round(metrics.temperature)}°
-                  </div>
+                  {telemetry.wind_direction_deg !== null ? (
+                    <div className="flex items-center gap-2">
+                      <WindCompass deg={telemetry.wind_direction_deg} />
+                      <div>
+                        <div className="text-2xl font-bold text-sky-700">
+                          {Math.round(telemetry.wind_direction_deg)}°
+                        </div>
+                        <div className="text-sm font-semibold text-sky-500">
+                          {compassLabel(telemetry.wind_direction_deg)}
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-3xl font-bold text-slate-400">—</div>
+                  )}
                 </div>
               </div>
             </div>
