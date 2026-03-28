@@ -2,8 +2,8 @@
 
 import { useState, useEffect, useRef } from 'react';
 import dynamic from 'next/dynamic';
-import { Play, Navigation, Battery, Wind, Gauge, Save, Download } from 'lucide-react';
-import { saveMission, exportMissionFile } from '@/lib/missionApi';
+import { Play, Navigation, Battery, Wind, Gauge, Save, Download, Upload, CheckCircle } from 'lucide-react';
+import { saveMission, exportMissionFile, uploadMissionToPixhawk } from '@/lib/missionApi';
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? 'ws://localhost:8000/api/telemetry/ws';
 
@@ -12,6 +12,14 @@ interface TelemetryData {
   wind_speed_knots: number | null;
   wind_direction_deg: number | null;
   timestamp: number | null;
+  current_waypoint_seq: number | null;
+  mission_count: number | null;
+  gps_lat: number | null;
+  gps_lon: number | null;
+  gps_alt_m: number | null;
+  gps_heading_deg: number | null;
+  gps_speed_knots: number | null;
+  gps_fix: boolean;
 }
 
 /** Converts degrees to 16-point compass label (e.g. 45 → "NE"). */
@@ -72,7 +80,17 @@ export default function MissionPlanner() {
     wind_speed_knots: null,
     wind_direction_deg: null,
     timestamp: null,
+    current_waypoint_seq: null,
+    mission_count: null,
+    gps_lat: null,
+    gps_lon: null,
+    gps_alt_m: null,
+    gps_heading_deg: null,
+    gps_speed_knots: null,
+    gps_fix: false,
   });
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadSuccess, setUploadSuccess] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -122,9 +140,46 @@ export default function MissionPlanner() {
     });
   };
 
-  const handleStartMission = () => {
-    if (waypoints.length > 0) {
+  const handleStartMission = async () => {
+    if (waypoints.length === 0) return;
+    setIsUploading(true);
+    setApiError(null);
+    setUploadSuccess(false);
+    try {
+      const mission = await saveMission({
+        name: missionName,
+        waypoints: waypoints.map(wp => ({ latitude: wp.lat, longitude: wp.lng })),
+      });
+      setSavedMissionId(mission.id);
+      await uploadMissionToPixhawk(mission.id);
       setStatus('running');
+      setUploadSuccess(true);
+      setTimeout(() => setUploadSuccess(false), 3000);
+    } catch (err) {
+      setApiError(err instanceof Error ? err.message : 'Mission start failed');
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  const handleReupload = async () => {
+    if (waypoints.length === 0) return;
+    setIsUploading(true);
+    setApiError(null);
+    setUploadSuccess(false);
+    try {
+      const mission = await saveMission({
+        name: missionName,
+        waypoints: waypoints.map(wp => ({ latitude: wp.lat, longitude: wp.lng })),
+      });
+      setSavedMissionId(mission.id);
+      await uploadMissionToPixhawk(mission.id);
+      setUploadSuccess(true);
+      setTimeout(() => setUploadSuccess(false), 3000);
+    } catch (err) {
+      setApiError(err instanceof Error ? err.message : 'Re-upload failed');
+    } finally {
+      setIsUploading(false);
     }
   };
 
@@ -197,10 +252,25 @@ export default function MissionPlanner() {
       <div className="flex-1 flex overflow-hidden">
         {/* Map Section */}
         <div className="flex-1 relative">
-          <MapComponent 
+          <MapComponent
             waypoints={waypoints}
             onMapClick={handleMapClick}
             onWaypointRemove={removeWaypoint}
+            activeWaypointOrder={
+              status === 'running' && telemetry.current_waypoint_seq !== null
+                ? telemetry.current_waypoint_seq + 1
+                : undefined
+            }
+            vesselPosition={
+              telemetry.gps_lat !== null && telemetry.gps_lon !== null
+                ? {
+                    lat: telemetry.gps_lat,
+                    lng: telemetry.gps_lon,
+                    heading: telemetry.gps_heading_deg,
+                    fix: telemetry.gps_fix,
+                  }
+                : null
+            }
           />
         </div>
 
@@ -210,15 +280,35 @@ export default function MissionPlanner() {
             {/* Mission Control */}
             <div>
               <h2 className="text-xl font-bold text-slate-800 mb-4">Mission Control</h2>
-              
+
+              {/* Upload success banner */}
+              {uploadSuccess && (
+                <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-300 text-emerald-700 text-sm font-medium px-4 py-2 rounded-lg mb-3">
+                  <CheckCircle className="w-4 h-4 flex-shrink-0" />
+                  Waypoints uploaded to Pixhawk successfully
+                </div>
+              )}
+
               <button
                 onClick={handleStartMission}
-                disabled={waypoints.length === 0 || status === 'running'}
-                className="w-full bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 disabled:from-slate-300 disabled:to-slate-400 text-white font-semibold py-3 px-4 rounded-lg shadow-lg shadow-emerald-500/25 disabled:shadow-none transition-all duration-200 flex items-center justify-center gap-2 mb-4"
+                disabled={waypoints.length === 0 || status === 'running' || isUploading}
+                className="w-full bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 disabled:from-slate-300 disabled:to-slate-400 text-white font-semibold py-3 px-4 rounded-lg shadow-lg shadow-emerald-500/25 disabled:shadow-none transition-all duration-200 flex items-center justify-center gap-2 mb-3"
               >
                 <Play className="w-5 h-5 fill-current" />
-                Start Mission
+                {isUploading && status === 'idle' ? 'Uploading…' : 'Start Mission'}
               </button>
+
+              {/* Re-upload button — visible once mission is running */}
+              {status === 'running' && (
+                <button
+                  onClick={handleReupload}
+                  disabled={isUploading}
+                  className="w-full bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 disabled:from-slate-300 disabled:to-slate-400 text-white font-semibold py-2 px-4 rounded-lg shadow-lg shadow-blue-500/25 disabled:shadow-none transition-all duration-200 flex items-center justify-center gap-2 mb-3"
+                >
+                  <Upload className="w-4 h-4" />
+                  {isUploading ? 'Uploading…' : 'Re-upload to Pixhawk'}
+                </button>
+              )}
 
               <button
                 onClick={handleReset}
@@ -305,26 +395,45 @@ export default function MissionPlanner() {
                 </div>
               ) : (
                 <div className="space-y-2 max-h-64 overflow-y-auto">
-                  {waypoints.map((wp) => (
+                  {waypoints.map((wp) => {
+                    // Map 1-indexed order to 0-indexed MAVLink seq for status comparison
+                    const seq = wp.order - 1;
+                    const isActive = status === 'running' && telemetry.current_waypoint_seq === seq;
+                    const isCompleted = status === 'running' && telemetry.current_waypoint_seq !== null && seq < telemetry.current_waypoint_seq;
+                    return (
                     <div
                       key={wp.id}
-                      className="bg-slate-50 hover:bg-slate-100 rounded-lg p-3 transition-colors duration-150 group"
+                      className={`rounded-lg p-3 transition-colors duration-150 group ${
+                        isActive
+                          ? 'bg-orange-50 border border-orange-300 ring-1 ring-orange-300'
+                          : isCompleted
+                          ? 'bg-slate-50 opacity-60'
+                          : 'bg-slate-50 hover:bg-slate-100'
+                      }`}
                     >
                       <div className="flex items-start justify-between">
                         <div className="flex-1">
                           <div className="flex items-center gap-2 mb-1">
                             <span className={`w-6 h-6 rounded-full text-white text-xs font-bold flex items-center justify-center ${
+                              isActive ? 'bg-orange-500' :
+                              isCompleted ? 'bg-slate-400' :
                               wp.order === 1 && waypoints.length > 1 ? 'bg-emerald-500' :
                               wp.order === waypoints.length && waypoints.length > 1 ? 'bg-red-500' :
                               'bg-blue-500'
                             }`}>
-                              {wp.order}
+                              {isCompleted ? '✓' : wp.order}
                             </span>
-                            <span className="font-semibold text-slate-700 text-sm">
+                            <span className={`font-semibold text-sm ${isActive ? 'text-orange-700' : isCompleted ? 'text-slate-400' : 'text-slate-700'}`}>
                               {wp.order === 1 && waypoints.length > 1 ? 'Start' :
                                wp.order === waypoints.length && waypoints.length > 1 ? 'End' :
                                `Waypoint ${wp.order}`}
                             </span>
+                            {isActive && (
+                              <span className="ml-auto text-xs font-semibold text-orange-600 flex items-center gap-1">
+                                <span className="w-1.5 h-1.5 rounded-full bg-orange-500 animate-pulse" />
+                                Active
+                              </span>
+                            )}
                           </div>
                           <div className="text-xs text-slate-500 font-mono ml-8">
                             <div>Lat: {wp.lat.toFixed(6)}</div>
@@ -341,7 +450,7 @@ export default function MissionPlanner() {
                         </button>
                       </div>
                     </div>
-                  ))}
+                  ); })}
                 </div>
               )}
             </div>
@@ -384,7 +493,7 @@ export default function MissionPlanner() {
                   </div>
                 </div>
 
-                {/* Boat Speed */}
+                {/* Boat Speed — derived from GPS ground velocity */}
                 <div className="bg-gradient-to-br from-purple-50 to-purple-100 rounded-lg p-4 border border-purple-200">
                   <div className="flex items-center gap-2 mb-2">
                     <Gauge className="w-4 h-4 text-purple-600" />
@@ -392,7 +501,11 @@ export default function MissionPlanner() {
                       Speed
                     </span>
                   </div>
-                  <div className="text-3xl font-bold text-purple-700">—</div>
+                  <div className="text-3xl font-bold text-purple-700">
+                    {telemetry.gps_speed_knots !== null
+                      ? <>{telemetry.gps_speed_knots.toFixed(1)}<span className="text-lg ml-1">kts</span></>
+                      : <span className="text-slate-400">—</span>}
+                  </div>
                 </div>
 
                 {/* Wind Direction — live from SN-FXJT05 vane via Pixhawk */}

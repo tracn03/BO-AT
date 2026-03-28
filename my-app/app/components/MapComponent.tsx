@@ -11,18 +11,52 @@ interface Waypoint {
   order: number;
 }
 
+interface VesselPosition {
+  lat: number;
+  lng: number;
+  heading: number | null;
+  fix: boolean;
+}
+
 interface MapComponentProps {
   waypoints: Waypoint[];
   onMapClick: (lat: number, lng: number) => void;
   onWaypointRemove: (id: string) => void;
+  activeWaypointOrder?: number;
+  vesselPosition?: VesselPosition | null;
 }
 
-export default function MapComponent({ waypoints, onMapClick, onWaypointRemove }: MapComponentProps) {
+function buildVesselIcon(heading: number | null, fix: boolean): L.DivIcon {
+  const color = fix ? '#0ea5e9' : '#94a3b8';
+  const opacity = fix ? '1' : '0.6';
+
+  // Heading arrow: a triangle outside the circle pointing in travel direction.
+  // SVG rotated around the marker centre (24,24).
+  const arrow = heading !== null
+    ? `<g transform="rotate(${heading}, 24, 24)">
+         <polygon points="24,3 19,14 24,10 29,14" fill="${color}" opacity="${opacity}" />
+       </g>`
+    : '';
+
+  return L.divIcon({
+    className: '',
+    html: `<svg viewBox="0 0 48 48" width="48" height="48" xmlns="http://www.w3.org/2000/svg">
+      ${arrow}
+      <circle cx="24" cy="24" r="11" fill="${color}" stroke="white" stroke-width="2.5" opacity="${opacity}" />
+      <circle cx="24" cy="24" r="4"  fill="white" opacity="${opacity}" />
+    </svg>`,
+    iconSize: [48, 48],
+    iconAnchor: [24, 24],
+  });
+}
+
+export default function MapComponent({ waypoints, onMapClick, onWaypointRemove, activeWaypointOrder, vesselPosition }: MapComponentProps) {
   const mapRef = useRef<L.Map | null>(null);
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const markersRef = useRef<{ [key: string]: L.Marker }>({});
   const polylineRef = useRef<L.Polyline | null>(null);
   const arrowsRef = useRef<L.Polyline[]>([]);
+  const vesselMarkerRef = useRef<L.Marker | null>(null);
 
   // Initialize map
   useEffect(() => {
@@ -49,6 +83,32 @@ export default function MapComponent({ waypoints, onMapClick, onWaypointRemove }
       mapRef.current = null;
     };
   }, []);
+
+  // Vessel marker — updated independently of waypoints
+  useEffect(() => {
+    if (!mapRef.current) return;
+    const map = mapRef.current;
+
+    if (!vesselPosition) {
+      if (vesselMarkerRef.current) {
+        map.removeLayer(vesselMarkerRef.current);
+        vesselMarkerRef.current = null;
+      }
+      return;
+    }
+
+    const { lat, lng, heading, fix } = vesselPosition;
+    const icon = buildVesselIcon(heading, fix);
+
+    if (vesselMarkerRef.current) {
+      vesselMarkerRef.current.setLatLng([lat, lng]);
+      vesselMarkerRef.current.setIcon(icon);
+    } else {
+      vesselMarkerRef.current = L.marker([lat, lng], { icon, zIndexOffset: 1000 })
+        .bindTooltip('Vessel', { permanent: false, direction: 'top' })
+        .addTo(map);
+    }
+  }, [vesselPosition]);
 
   const calculateDistance = (lat1: number, lng1: number, lat2: number, lng2: number) => {
     const R = 6371e3; // Earth's radius in meters
@@ -90,8 +150,15 @@ export default function MapComponent({ waypoints, onMapClick, onWaypointRemove }
 
     // Add new markers
     waypoints.forEach((wp, index) => {
-      let markerColor = '#3b82f6'; // Blue
-      if (index === 0 && waypoints.length > 1) {
+      const isActive = activeWaypointOrder !== undefined && wp.order === activeWaypointOrder;
+      const isCompleted = activeWaypointOrder !== undefined && wp.order < activeWaypointOrder;
+
+      let markerColor = '#3b82f6'; // Blue default
+      if (isActive) {
+        markerColor = '#f97316'; // Orange for active waypoint
+      } else if (isCompleted) {
+        markerColor = '#94a3b8'; // Muted slate for completed
+      } else if (index === 0 && waypoints.length > 1) {
         markerColor = '#10b981'; // Green for start
       } else if (index === waypoints.length - 1 && waypoints.length > 1) {
         markerColor = '#ef4444'; // Red for end
@@ -112,11 +179,11 @@ export default function MapComponent({ waypoints, onMapClick, onWaypointRemove }
             font-weight: bold;
             color: white;
             font-size: 16px;
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+            box-shadow: ${isActive ? `0 0 0 3px ${markerColor}, 0 4px 12px rgba(0,0,0,0.3)` : '0 4px 12px rgba(0, 0, 0, 0.3)'};
             cursor: pointer;
             transition: transform 0.2s;
           ">
-            ${wp.order}
+            ${isCompleted ? '✓' : wp.order}
           </div>
         `,
         iconSize: [40, 40],
@@ -237,9 +304,6 @@ export default function MapComponent({ waypoints, onMapClick, onWaypointRemove }
         arrowsRef.current.push(arrowMarker as any);
       }
 
-      // Fit map to show all waypoints
-      const bounds = L.latLngBounds(coordinates);
-      map.fitBounds(bounds, { padding: [50, 50] });
     }
 
     (window as any).removeWaypoint = onWaypointRemove;
@@ -247,7 +311,7 @@ export default function MapComponent({ waypoints, onMapClick, onWaypointRemove }
     return () => {
       delete (window as any).removeWaypoint;
     };
-  }, [waypoints, onWaypointRemove]);
+  }, [waypoints, onWaypointRemove, activeWaypointOrder]);
 
   return (
     <div ref={mapContainerRef} className="w-full h-full" />

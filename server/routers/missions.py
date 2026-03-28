@@ -8,6 +8,7 @@ from datetime import datetime
 from database import get_db
 from models import Mission, Waypoint
 from waypoint_handler import generate_waypoints_file
+from mavlink_connection import mavlink_conn
 
 router = APIRouter()
 
@@ -121,6 +122,42 @@ def delete_mission(mission_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Mission not found.")
     db.delete(mission)
     db.commit()
+
+
+@router.post("/{mission_id}/upload")
+def upload_mission_to_pixhawk(mission_id: int, db: Session = Depends(get_db)):
+    """
+    Upload a saved mission's waypoints to the Pixhawk via MAVLink.
+    The Pixhawk must be connected over the SiK radio.
+    """
+    mission = db.query(Mission).filter(Mission.id == mission_id).first()
+    if not mission:
+        raise HTTPException(status_code=404, detail="Mission not found.")
+    if not mission.waypoints:
+        raise HTTPException(status_code=422, detail="Mission has no waypoints.")
+
+    sorted_waypoints = sorted(mission.waypoints, key=lambda w: w.sequence)
+    wp_dicts = [
+        {
+            "latitude": wp.latitude,
+            "longitude": wp.longitude,
+            "altitude": wp.altitude,
+            "command": wp.command,
+            "frame": wp.frame,
+            "param1": wp.param1,
+            "param2": wp.param2,
+            "param3": wp.param3,
+            "param4": wp.param4,
+            "autocontinue": wp.autocontinue,
+        }
+        for wp in sorted_waypoints
+    ]
+
+    result = mavlink_conn.upload_mission(wp_dicts)
+    if not result["success"]:
+        raise HTTPException(status_code=502, detail=result["message"])
+
+    return {"message": result["message"], "waypoint_count": len(wp_dicts)}
 
 
 @router.get("/{mission_id}/export", response_class=PlainTextResponse)

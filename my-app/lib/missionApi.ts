@@ -92,6 +92,16 @@ export async function deleteMission(id: number): Promise<void> {
   return apiFetch<void>(`/missions/${id}`, { method: "DELETE" });
 }
 
+export interface UploadResult {
+  message: string;
+  waypoint_count: number;
+}
+
+/** Upload a saved mission's waypoints to the Pixhawk over SiK radio. */
+export async function uploadMissionToPixhawk(id: number): Promise<UploadResult> {
+  return apiFetch<UploadResult>(`/missions/${id}/upload`, { method: "POST" });
+}
+
 /**
  * Download a mission as a .waypoints file compatible with Mission Planner.
  * Triggers a browser file download.
