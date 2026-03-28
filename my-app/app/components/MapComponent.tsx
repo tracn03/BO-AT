@@ -270,39 +270,6 @@ export default function MapComponent({ waypoints, onMapClick, onWaypointRemove, 
         lineCap: 'round'
       }).addTo(map);
 
-      for (let i = 0; i < coordinates.length - 1; i++) {
-        const start = coordinates[i];
-        const end = coordinates[i + 1];
-        
-        const midLat = (start[0] + end[0]) / 2;
-        const midLng = (start[1] + end[1]) / 2;
-        
-        const angle = Math.atan2(end[1] - start[1], end[0] - start[0]) * 180 / Math.PI;
-        
-        const arrowIcon = L.divIcon({
-          className: 'route-arrow',
-          html: `
-            <div style="
-              width: 0;
-              height: 0;
-              border-left: 8px solid transparent;
-              border-right: 8px solid transparent;
-              border-bottom: 12px solid #3b82f6;
-              transform: rotate(${angle + 90}deg);
-              filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.2));
-            "></div>
-          `,
-          iconSize: [16, 16],
-          iconAnchor: [8, 8]
-        });
-        
-        const arrowMarker = L.marker([midLat, midLng], { 
-          icon: arrowIcon,
-          interactive: false
-        }).addTo(map);
-        
-        arrowsRef.current.push(arrowMarker as any);
-      }
 
     }
 
