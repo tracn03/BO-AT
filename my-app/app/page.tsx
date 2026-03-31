@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import dynamic from 'next/dynamic';
-import { Play, Navigation, Battery, Wind, Gauge, Save, Download, Upload, CheckCircle } from 'lucide-react';
+import { Play, Navigation, Battery, Wind, Gauge, Save, Download, Upload, CheckCircle, MapPin } from 'lucide-react';
 import { saveMission, exportMissionFile, uploadMissionToPixhawk } from '@/lib/missionApi';
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? 'ws://localhost:8000/api/telemetry/ws';
@@ -530,6 +530,31 @@ export default function MissionPlanner() {
                     </div>
                   ) : (
                     <div className="text-3xl font-bold text-slate-400">—</div>
+                  )}
+                </div>
+              </div>
+
+              {/* GPS Status */}
+              <div className="mt-3 bg-gradient-to-br from-slate-50 to-slate-100 rounded-lg p-4 border border-slate-200">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <MapPin className="w-4 h-4 text-slate-600" />
+                    <span className="text-xs font-semibold text-slate-700 uppercase tracking-wide">GPS</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <span className={`w-2 h-2 rounded-full ${
+                      telemetry.gps_fix ? 'bg-emerald-500 animate-pulse' : 'bg-red-400'
+                    }`} />
+                    <span className="text-xs text-slate-500">
+                      {telemetry.gps_fix ? 'Fix' : telemetry.gps_lat !== null ? 'Stale' : 'No fix'}
+                    </span>
+                  </div>
+                </div>
+                <div className="text-xs font-mono text-slate-600 space-y-0.5">
+                  <div>Lat: {telemetry.gps_lat !== null ? telemetry.gps_lat.toFixed(6) : '—'}</div>
+                  <div>Lng: {telemetry.gps_lon !== null ? telemetry.gps_lon.toFixed(6) : '—'}</div>
+                  {telemetry.gps_heading_deg !== null && (
+                    <div>Hdg: {telemetry.gps_heading_deg.toFixed(1)}°</div>
                   )}
                 </div>
               </div>
