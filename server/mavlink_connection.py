@@ -23,9 +23,14 @@ MS_TO_KNOTS = 1.94384
 # ArduRover MAVLink message IDs
 MAVLINK_MSG_ID_WIND = 168
 MAVLINK_MSG_ID_GLOBAL_POSITION_INT = 33
+MAVLINK_MSG_ID_ATTITUDE = 30
 
 # GPS fix considered stale after this many seconds without a new message
 GPS_STALE_TIMEOUT = 5.0
+
+# Capsize detection parameters
+CAPSIZE_ROLL_THRESHOLD_DEG = 80.0   # |roll| above this triggers capsize
+CAPSIZE_SUSTAIN_SECS = 2.0          # must stay above threshold for this long
 
 
 class MAVLinkConnection:
@@ -36,6 +41,7 @@ class MAVLinkConnection:
         self._lock = threading.Lock()
         self._upload_paused = threading.Event()
         self._gps_last_update: Optional[float] = None
+        self._capsize_start: Optional[float] = None  # time roll first exceeded threshold
         self._data: Dict[str, Any] = {
             "connected": False,
             "wind_speed_knots": None,
@@ -48,6 +54,8 @@ class MAVLinkConnection:
             "gps_alt_m": None,
             "gps_heading_deg": None,
             "gps_speed_knots": None,
+            "roll_deg": None,
+            "capsized": False,
         }
 
     # ------------------------------------------------------------------ #
@@ -150,6 +158,17 @@ class MAVLinkConnection:
                 mavutil.mavlink.MAV_DATA_STREAM_POSITION,
                 4,  # 4 Hz
                 1,  # start
+            )
+
+            # Request ATTITUDE at 4 Hz for capsize detection
+            self._connection.mav.command_long_send(
+                self._connection.target_system,
+                self._connection.target_component,
+                mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+                0,
+                MAVLINK_MSG_ID_ATTITUDE,
+                250_000,  # interval in microseconds (4 Hz)
+                0, 0, 0, 0, 0,
             )
 
             with self._lock:
@@ -261,7 +280,7 @@ class MAVLinkConnection:
             try:
                 msg = self._connection.recv_match(
                     type=["WIND", "HEARTBEAT", "MISSION_CURRENT", "MISSION_ITEM_REACHED",
-                          "GLOBAL_POSITION_INT"],
+                          "GLOBAL_POSITION_INT", "ATTITUDE"],
                     blocking=True,
                     timeout=2.0,
                 )
@@ -294,9 +313,28 @@ class MAVLinkConnection:
                 elif msg_type == "MISSION_ITEM_REACHED":
                     logger.info("Waypoint seq=%d reached.", msg.seq)
 
+                elif msg_type == "ATTITUDE":
+                    roll_deg = round(math.degrees(msg.roll), 1)
+                    now = time.time()
+                    if abs(roll_deg) >= CAPSIZE_ROLL_THRESHOLD_DEG:
+                        if self._capsize_start is None:
+                            self._capsize_start = now
+                        capsized = (now - self._capsize_start) >= CAPSIZE_SUSTAIN_SECS
+                    else:
+                        self._capsize_start = None
+                        capsized = False
+                    with self._lock:
+                        self._data["roll_deg"] = roll_deg
+                        self._data["capsized"] = capsized
+
                 elif msg_type == "GLOBAL_POSITION_INT":
                     lat = msg.lat / 1e7          # degE7 → decimal degrees
                     lon = msg.lon / 1e7
+                    # lat=0 / lon=0 means the Pixhawk has no satellite fix yet;
+                    # skip the update so we don't place the marker at (0, 0)
+                    # and don't falsely advance _gps_last_update.
+                    if msg.lat == 0 and msg.lon == 0:
+                        continue
                     alt = msg.alt / 1000.0        # mm → metres
                     # vx/vy are in cm/s; derive ground speed in knots
                     speed_ms = math.sqrt(msg.vx ** 2 + msg.vy ** 2) / 100.0

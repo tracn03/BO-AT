@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import dynamic from 'next/dynamic';
 import { Play, Navigation, Battery, Wind, Gauge, Save, Download, Upload, CheckCircle, MapPin } from 'lucide-react';
 import { saveMission, exportMissionFile, uploadMissionToPixhawk } from '@/lib/missionApi';
@@ -20,6 +20,8 @@ interface TelemetryData {
   gps_heading_deg: number | null;
   gps_speed_knots: number | null;
   gps_fix: boolean;
+  roll_deg: number | null;
+  capsized: boolean;
 }
 
 /** Converts degrees to 16-point compass label (e.g. 45 → "NE"). */
@@ -88,6 +90,8 @@ export default function MissionPlanner() {
     gps_heading_deg: null,
     gps_speed_knots: null,
     gps_fix: false,
+    roll_deg: null,
+    capsized: false,
   });
   const [isUploading, setIsUploading] = useState(false);
   const [uploadSuccess, setUploadSuccess] = useState(false);
@@ -234,6 +238,18 @@ export default function MissionPlanner() {
     });
   };
 
+  const vesselPosition = useMemo(() => {
+    const { gps_lat, gps_lon, gps_heading_deg, gps_fix } = telemetry;
+    if (
+      gps_lat === null ||
+      gps_lon === null ||
+      (gps_lat === 0 && gps_lon === 0)
+    ) {
+      return null;
+    }
+    return { lat: gps_lat, lng: gps_lon, heading: gps_heading_deg, fix: gps_fix };
+  }, [telemetry.gps_lat, telemetry.gps_lon, telemetry.gps_heading_deg, telemetry.gps_fix]);
+
   return (
     <div className="h-screen w-screen flex flex-col bg-slate-50">
       {/* Header */}
@@ -248,6 +264,18 @@ export default function MissionPlanner() {
         </div>
       </header>
 
+      {/* Capsize Alert Banner */}
+      {telemetry.capsized && (
+        <div className="bg-red-600 text-white px-6 py-3 flex items-center justify-center gap-3 animate-pulse">
+          <svg className="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+          </svg>
+          <span className="font-bold text-sm tracking-wide uppercase">
+            Capsize Detected — Roll {telemetry.roll_deg !== null ? `${telemetry.roll_deg}°` : ''}
+          </span>
+        </div>
+      )}
+
       {/* Main Content */}
       <div className="flex-1 flex overflow-hidden">
         {/* Map Section */}
@@ -261,16 +289,7 @@ export default function MissionPlanner() {
                 ? telemetry.current_waypoint_seq + 1
                 : undefined
             }
-            vesselPosition={
-              telemetry.gps_lat !== null && telemetry.gps_lon !== null
-                ? {
-                    lat: telemetry.gps_lat,
-                    lng: telemetry.gps_lon,
-                    heading: telemetry.gps_heading_deg,
-                    fix: telemetry.gps_fix,
-                  }
-                : null
-            }
+            vesselPosition={vesselPosition}
           />
         </div>
 
