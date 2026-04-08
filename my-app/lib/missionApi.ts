@@ -102,6 +102,33 @@ export async function uploadMissionToPixhawk(id: number): Promise<UploadResult> 
   return apiFetch<UploadResult>(`/missions/${id}/upload`, { method: "POST" });
 }
 
+// Vehicle control endpoints
+
+export type VehicleMode = "MANUAL" | "HOLD" | "AUTO";
+
+/** Arm the vehicle (respects pre-arm checks). */
+export async function armVehicle(): Promise<{ message: string }> {
+  return apiFetch("/vehicle/arm", { method: "POST" });
+}
+
+/** Arm the vehicle, bypassing pre-arm checks. */
+export async function forceArmVehicle(): Promise<{ message: string }> {
+  return apiFetch("/vehicle/arm/force", { method: "POST" });
+}
+
+/** Disarm the vehicle. */
+export async function disarmVehicle(): Promise<{ message: string }> {
+  return apiFetch("/vehicle/disarm", { method: "POST" });
+}
+
+/** Set the flight mode (MANUAL, HOLD, or AUTO). */
+export async function setVehicleMode(mode: VehicleMode): Promise<{ message: string }> {
+  return apiFetch("/vehicle/mode", {
+    method: "POST",
+    body: JSON.stringify({ mode }),
+  });
+}
+
 /**
  * Download a mission as a .waypoints file compatible with Mission Planner.
  * Triggers a browser file download.

@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import dynamic from 'next/dynamic';
 import { Play, Navigation, Battery, Wind, Gauge, Save, Download, Upload, CheckCircle, MapPin } from 'lucide-react';
-import { saveMission, exportMissionFile, uploadMissionToPixhawk } from '@/lib/missionApi';
+import { saveMission, exportMissionFile, uploadMissionToPixhawk, armVehicle, forceArmVehicle, disarmVehicle, setVehicleMode, type VehicleMode } from '@/lib/missionApi';
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? 'ws://localhost:8000/api/telemetry/ws';
 
@@ -24,6 +24,11 @@ interface TelemetryData {
   pitch_deg: number | null;
   yaw_deg: number | null;
   capsized: boolean;
+  battery_pct: number | null;
+  battery_voltage_v: number | null;
+  battery_current_a: number | null;
+  armed: boolean;
+  flight_mode: string | null;
 }
 
 /** Converts degrees to 16-point compass label (e.g. 45 → "NE"). */
@@ -32,10 +37,33 @@ function compassLabel(deg: number): string {
   return labels[Math.round(deg / 22.5) % 16];
 }
 
-/** SVG arrow indicating wind direction (the direction wind is coming FROM). */
-function WindCompass({ deg }: { deg: number }) {
+/** SVG battery indicator showing charge level with colour-coded fill. */
+function BatteryIcon({ pct }: { pct: number | null }) {
+  const fill = pct ?? 0;
+  const color = fill > 50 ? '#16a34a' : fill > 20 ? '#d97706' : '#dc2626';
+  // Body: 28×14, nub: 3×6 on the right. Inner fill area is 22×10 starting at x=3, y=2.
+  const fillW = Math.round((fill / 100) * 22);
   return (
-    <svg viewBox="0 0 64 64" className="w-12 h-12" aria-label={`Wind from ${deg}°`}>
+    <svg viewBox="0 0 34 14" className="w-10 h-5" aria-label={`Battery ${pct ?? '—'}%`}>
+      {/* Body outline */}
+      <rect x="0.5" y="0.5" width="28" height="13" rx="2.5" ry="2.5"
+        fill="none" stroke={pct !== null ? color : '#94a3b8'} strokeWidth="1.5" />
+      {/* Terminal nub */}
+      <rect x="29.5" y="4" width="3.5" height="6" rx="1"
+        fill={pct !== null ? color : '#94a3b8'} />
+      {/* Charge fill */}
+      {pct !== null && fillW > 0 && (
+        <rect x="3" y="3" width={fillW} height="8" rx="1.5"
+          fill={color} />
+      )}
+    </svg>
+  );
+}
+
+/** SVG arrow indicating wind direction (the direction wind is coming FROM). */
+function WindCompass({ deg, className = 'w-12 h-12' }: { deg: number; className?: string }) {
+  return (
+    <svg viewBox="0 0 64 64" className={className} aria-label={`Wind from ${deg}°`}>
       {/* Outer ring */}
       <circle cx="32" cy="32" r="30" fill="none" stroke="#bfdbfe" strokeWidth="2" />
       {/* Cardinal labels */}
@@ -167,9 +195,9 @@ function OrientationReadout({ label, value, sign = false, yaw = false }: {
   return (
     <div>
       <div className="text-xs text-slate-500 uppercase tracking-widest mb-0.5">{label}</div>
-      <div className="text-xl font-bold text-white font-mono leading-tight tabular-nums">{display}</div>
+      <div className="text-xl font-bold text-slate-800 font-mono leading-tight tabular-nums">{display}</div>
       {yaw && value !== null && (
-        <div className="text-xs text-slate-400 font-semibold mt-0.5">{compassLabel(value)}</div>
+        <div className="text-xs text-slate-500 font-semibold mt-0.5">{compassLabel(value)}</div>
       )}
     </div>
   );
@@ -217,9 +245,24 @@ export default function MissionPlanner() {
     pitch_deg: null,
     yaw_deg: null,
     capsized: false,
+    battery_pct: null,
+    battery_voltage_v: null,
+    battery_current_a: null,
+    armed: false,
+    flight_mode: null,
   });
   const [isUploading, setIsUploading] = useState(false);
   const [uploadSuccess, setUploadSuccess] = useState(false);
+
+  // Vehicle control state
+  const [vehicleLoading, setVehicleLoading] = useState<'arm' | 'forceArm' | 'disarm' | 'mode' | null>(null);
+  const [vehicleError, setVehicleError] = useState<string | null>(null);
+  // Inline ARM confirmation flow
+  const [armConfirmOpen, setArmConfirmOpen] = useState(false);
+  const [skipArmConfirm, setSkipArmConfirm] = useState(
+    () => typeof window !== 'undefined' && localStorage.getItem('bo-at:skip-arm-confirm') === 'true'
+  );
+  const armConfirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -330,6 +373,64 @@ export default function MissionPlanner() {
     setApiError(null);
   };
 
+  // ── Vehicle control handlers ─────────────────────────────────────────────
+
+  function handleArmClick() {
+    if (skipArmConfirm) {
+      executeArm(false);
+    } else {
+      setArmConfirmOpen(true);
+      // Auto-dismiss confirmation after 8 s if no action taken
+      if (armConfirmTimer.current) clearTimeout(armConfirmTimer.current);
+      armConfirmTimer.current = setTimeout(() => setArmConfirmOpen(false), 8000);
+    }
+  }
+
+  async function executeArm(force: boolean) {
+    if (armConfirmTimer.current) clearTimeout(armConfirmTimer.current);
+    setArmConfirmOpen(false);
+    setVehicleLoading(force ? 'forceArm' : 'arm');
+    setVehicleError(null);
+    try {
+      await (force ? forceArmVehicle() : armVehicle());
+    } catch (err) {
+      setVehicleError(err instanceof Error ? err.message : 'Arm failed');
+    } finally {
+      setVehicleLoading(null);
+    }
+  }
+
+  async function handleDisarm() {
+    setVehicleLoading('disarm');
+    setVehicleError(null);
+    try {
+      await disarmVehicle();
+    } catch (err) {
+      setVehicleError(err instanceof Error ? err.message : 'Disarm failed');
+    } finally {
+      setVehicleLoading(null);
+    }
+  }
+
+  async function handleSetMode(mode: VehicleMode) {
+    setVehicleLoading('mode');
+    setVehicleError(null);
+    try {
+      await setVehicleMode(mode);
+    } catch (err) {
+      setVehicleError(err instanceof Error ? err.message : 'Mode change failed');
+    } finally {
+      setVehicleLoading(null);
+    }
+  }
+
+  function toggleSkipArmConfirm(checked: boolean) {
+    setSkipArmConfirm(checked);
+    localStorage.setItem('bo-at:skip-arm-confirm', String(checked));
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+
   const removeWaypoint = (id: string) => {
     setWaypoints(prevWaypoints => {
       const filtered = prevWaypoints.filter(wp => wp.id !== id);
@@ -393,28 +494,140 @@ export default function MissionPlanner() {
             />
           </div>
 
-          {/* Orientation panel */}
-          <div className="h-48 bg-slate-950 border-t border-slate-800 flex items-center gap-6 px-6 flex-shrink-0">
-            {/* Attitude indicator */}
-            <div className="w-36 h-36 flex-shrink-0">
-              {telemetry.roll_deg !== null && telemetry.pitch_deg !== null ? (
-                <AttitudeIndicator roll={telemetry.roll_deg} pitch={telemetry.pitch_deg} />
-              ) : (
-                <div className="w-full h-full rounded-full border border-slate-800 flex items-center justify-center">
-                  <span className="text-slate-600 text-xs">No signal</span>
+          {/* Bottom strip: Orientation + Metrics */}
+          <div className="bg-white border-t border-slate-200 flex flex-shrink-0 overflow-hidden">
+            {/* Left sub-section: Orientation */}
+            <div className="flex items-center gap-6 px-6 py-4 border-r border-slate-200">
+              {/* Attitude indicator */}
+              <div className="w-36 h-36 flex-shrink-0">
+                {telemetry.roll_deg !== null && telemetry.pitch_deg !== null ? (
+                  <AttitudeIndicator roll={telemetry.roll_deg} pitch={telemetry.pitch_deg} />
+                ) : (
+                  <div className="w-full h-full rounded-full border border-slate-200 flex items-center justify-center">
+                    <span className="text-slate-400 text-xs">No signal</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Readouts */}
+              <div className="flex flex-col gap-1">
+                <div className="text-xs font-semibold text-slate-500 uppercase tracking-widest mb-2">
+                  Orientation
                 </div>
-              )}
+                <div className="grid grid-cols-3 gap-6">
+                  <OrientationReadout label="Roll"  value={telemetry.roll_deg}  sign />
+                  <OrientationReadout label="Pitch" value={telemetry.pitch_deg} sign />
+                  <OrientationReadout label="Yaw"   value={telemetry.yaw_deg}   yaw />
+                </div>
+              </div>
             </div>
 
-            {/* Readouts */}
-            <div className="flex flex-col gap-1">
-              <div className="text-xs font-semibold text-slate-500 uppercase tracking-widest mb-2">
-                Orientation
+            {/* Right sub-section: Metrics */}
+            <div className="flex-1 px-6 py-4 overflow-y-auto">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-bold text-slate-800 uppercase tracking-wide">Metrics</h3>
+                {/* Radio connection status */}
+                <div className="flex items-center gap-1.5">
+                  <span className={`w-2 h-2 rounded-full ${telemetry.connected ? 'bg-emerald-500 animate-pulse' : 'bg-red-400'}`} />
+                  <span className="text-xs text-slate-500">
+                    {telemetry.connected ? 'SiK radio connected' : 'Radio disconnected'}
+                  </span>
+                </div>
               </div>
-              <div className="grid grid-cols-3 gap-6">
-                <OrientationReadout label="Roll"  value={telemetry.roll_deg}  sign />
-                <OrientationReadout label="Pitch" value={telemetry.pitch_deg} sign />
-                <OrientationReadout label="Yaw"   value={telemetry.yaw_deg}   yaw />
+
+              <div className="grid grid-cols-4 gap-3">
+                {/* Battery */}
+                <div className="bg-gradient-to-br from-emerald-50 to-emerald-100 rounded-lg p-3 border border-emerald-200">
+                  <div className="flex items-center gap-1.5 mb-1.5">
+                    <Battery className="w-3.5 h-3.5 text-emerald-600" />
+                    <span className="text-xs font-semibold text-emerald-700 uppercase tracking-wide">Battery</span>
+                  </div>
+                  <BatteryIcon pct={telemetry.battery_pct} />
+                  <div className="text-2xl font-bold text-emerald-700 tabular-nums mt-1">
+                    {telemetry.battery_pct !== null
+                      ? <>{telemetry.battery_pct}<span className="text-lg ml-0.5">%</span></>
+                      : <span className="text-slate-400">—</span>}
+                  </div>
+                  <div className="flex gap-2 mt-1.5">
+                    <span className="text-xs font-mono text-emerald-600">
+                      {telemetry.battery_voltage_v !== null ? `${telemetry.battery_voltage_v}V` : '—'}
+                    </span>
+                    <span className="text-xs text-emerald-300">·</span>
+                    <span className="text-xs font-mono text-emerald-600">
+                      {telemetry.battery_current_a !== null ? `${telemetry.battery_current_a}A` : '—'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Wind Speed */}
+                <div className="bg-gradient-to-br from-blue-50 to-blue-100 rounded-lg p-3 border border-blue-200">
+                  <div className="flex items-center gap-1.5 mb-1.5">
+                    <Wind className="w-3.5 h-3.5 text-blue-600" />
+                    <span className="text-xs font-semibold text-blue-700 uppercase tracking-wide">Wind Speed</span>
+                  </div>
+                  <div className="text-2xl font-bold text-blue-700">
+                    {telemetry.wind_speed_knots !== null
+                      ? <>{telemetry.wind_speed_knots.toFixed(1)}<span className="text-sm ml-1">kts</span></>
+                      : <span className="text-slate-400">—</span>}
+                  </div>
+                </div>
+
+                {/* Boat Speed */}
+                <div className="bg-gradient-to-br from-purple-50 to-purple-100 rounded-lg p-3 border border-purple-200">
+                  <div className="flex items-center gap-1.5 mb-1.5">
+                    <Gauge className="w-3.5 h-3.5 text-purple-600" />
+                    <span className="text-xs font-semibold text-purple-700 uppercase tracking-wide">Speed</span>
+                  </div>
+                  <div className="text-2xl font-bold text-purple-700">
+                    {telemetry.gps_speed_knots !== null
+                      ? <>{telemetry.gps_speed_knots.toFixed(1)}<span className="text-sm ml-1">kts</span></>
+                      : <span className="text-slate-400">—</span>}
+                  </div>
+                </div>
+
+                {/* Wind Direction */}
+                <div className="bg-gradient-to-br from-sky-50 to-sky-100 rounded-lg p-3 border border-sky-200">
+                  <div className="flex items-center gap-1.5 mb-1.5">
+                    <Wind className="w-3.5 h-3.5 text-sky-600" />
+                    <span className="text-xs font-semibold text-sky-700 uppercase tracking-wide">Wind Dir</span>
+                  </div>
+                  {telemetry.wind_direction_deg !== null ? (
+                    <div className="flex flex-col items-center gap-1">
+                      <WindCompass deg={telemetry.wind_direction_deg} className="w-10 h-10 flex-shrink-0" />
+                      <div className="text-center">
+                        <div className="text-lg font-bold text-sky-700 leading-tight">
+                          {Math.round(telemetry.wind_direction_deg)}°
+                        </div>
+                        <div className="text-xs font-semibold text-sky-500">
+                          {compassLabel(telemetry.wind_direction_deg)}
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-2xl font-bold text-slate-400">—</div>
+                  )}
+                </div>
+              </div>
+
+              {/* GPS Status */}
+              <div className="mt-3 bg-gradient-to-br from-slate-50 to-slate-100 rounded-lg px-4 py-2.5 border border-slate-200">
+                <div className="flex items-center gap-6">
+                  <div className="flex items-center gap-2">
+                    <MapPin className="w-4 h-4 text-slate-600" />
+                    <span className="text-xs font-semibold text-slate-700 uppercase tracking-wide">GPS</span>
+                    <span className={`w-2 h-2 rounded-full ${telemetry.gps_fix ? 'bg-emerald-500 animate-pulse' : 'bg-red-400'}`} />
+                    <span className="text-xs text-slate-500">
+                      {telemetry.gps_fix ? 'Fix' : telemetry.gps_lat !== null ? 'Stale' : 'No fix'}
+                    </span>
+                  </div>
+                  <div className="flex gap-4 text-xs font-mono text-slate-600">
+                    <span>Lat: {telemetry.gps_lat !== null ? telemetry.gps_lat.toFixed(6) : '—'}</span>
+                    <span>Lng: {telemetry.gps_lon !== null ? telemetry.gps_lon.toFixed(6) : '—'}</span>
+                    {telemetry.gps_heading_deg !== null && (
+                      <span>Hdg: {telemetry.gps_heading_deg.toFixed(1)}°</span>
+                    )}
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -423,6 +636,118 @@ export default function MissionPlanner() {
         {/* Control Panel */}
         <div className="w-96 bg-white border-l border-slate-200 flex flex-col overflow-hidden">
           <div className="flex-1 overflow-y-auto p-6 space-y-6">
+
+            {/* ── Vehicle Control ─────────────────────────────────────── */}
+            <div>
+              <h2 className="text-xl font-bold text-slate-800 mb-4">Vehicle Control</h2>
+
+              {/* Disabled notice when radio is disconnected */}
+              {!telemetry.connected && (
+                <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 mb-4 text-xs text-slate-500">
+                  <span className="w-2 h-2 rounded-full bg-red-400 flex-shrink-0" />
+                  Radio disconnected — vehicle controls unavailable
+                </div>
+              )}
+
+              {/* Status badges */}
+              <div className="flex items-center gap-2 mb-4">
+                <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold uppercase tracking-wide ${
+                  telemetry.armed
+                    ? 'bg-red-100 text-red-700 border border-red-300'
+                    : 'bg-slate-100 text-slate-500 border border-slate-200'
+                }`}>
+                  <span className={`w-1.5 h-1.5 rounded-full ${telemetry.armed ? 'bg-red-500 animate-pulse' : 'bg-slate-400'}`} />
+                  {telemetry.armed ? 'Armed' : 'Disarmed'}
+                </span>
+                {telemetry.flight_mode && (
+                  <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-bold uppercase tracking-wide bg-blue-50 text-blue-700 border border-blue-200">
+                    {telemetry.flight_mode}
+                  </span>
+                )}
+              </div>
+
+              {/* Arm / Disarm */}
+              <div className="flex gap-2 mb-2">
+                <button
+                  onClick={handleArmClick}
+                  disabled={telemetry.armed || vehicleLoading !== null || !telemetry.connected}
+                  className="flex-1 bg-gradient-to-r from-red-500 to-red-600 hover:from-red-600 hover:to-red-700 disabled:from-slate-300 disabled:to-slate-400 text-white font-semibold py-2 px-3 rounded-lg text-sm shadow-md shadow-red-500/20 disabled:shadow-none transition-all duration-200"
+                >
+                  {vehicleLoading === 'arm' ? 'Arming…' : vehicleLoading === 'forceArm' ? 'Force arming…' : 'Arm'}
+                </button>
+                <button
+                  onClick={handleDisarm}
+                  disabled={!telemetry.armed || vehicleLoading !== null || !telemetry.connected}
+                  className="flex-1 bg-slate-100 hover:bg-slate-200 disabled:bg-slate-50 disabled:text-slate-300 text-slate-700 font-semibold py-2 px-3 rounded-lg text-sm border border-slate-200 transition-all duration-200"
+                >
+                  {vehicleLoading === 'disarm' ? 'Disarming…' : 'Disarm'}
+                </button>
+              </div>
+
+              {/* Inline ARM confirmation */}
+              {armConfirmOpen && (
+                <div className="bg-amber-50 border border-amber-300 rounded-lg p-3 mb-2">
+                  <p className="text-sm font-semibold text-amber-800 mb-2">Confirm arming the vessel?</p>
+                  <label className="flex items-center gap-2 text-xs text-amber-700 mb-3 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={skipArmConfirm}
+                      onChange={e => toggleSkipArmConfirm(e.target.checked)}
+                      className="rounded"
+                    />
+                    Don't ask again
+                  </label>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => { if (armConfirmTimer.current) clearTimeout(armConfirmTimer.current); setArmConfirmOpen(false); }}
+                      className="flex-1 py-1.5 px-3 rounded-md text-xs font-semibold bg-white border border-slate-300 text-slate-600 hover:bg-slate-50 transition-colors"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={() => executeArm(false)}
+                      className="flex-1 py-1.5 px-3 rounded-md text-xs font-semibold bg-red-500 hover:bg-red-600 text-white transition-colors"
+                    >
+                      Confirm Arm
+                    </button>
+                    <button
+                      onClick={() => executeArm(true)}
+                      className="flex-1 py-1.5 px-3 rounded-md text-xs font-semibold bg-red-900 hover:bg-red-800 text-white transition-colors"
+                      title="Bypasses pre-arm safety checks"
+                    >
+                      Force Arm
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Mode buttons */}
+              <div className="grid grid-cols-3 gap-2 mb-2">
+                {(['MANUAL', 'HOLD', 'AUTO'] as VehicleMode[]).map(mode => {
+                  const active = telemetry.flight_mode === mode;
+                  return (
+                    <button
+                      key={mode}
+                      onClick={() => handleSetMode(mode)}
+                      disabled={vehicleLoading !== null || !telemetry.connected}
+                      className={`py-2 rounded-lg text-xs font-bold uppercase tracking-wide border transition-all duration-150 ${
+                        active
+                          ? 'bg-blue-500 text-white border-blue-500 shadow-md shadow-blue-500/25'
+                          : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50 disabled:opacity-40'
+                      }`}
+                    >
+                      {vehicleLoading === 'mode' && !active ? '…' : mode}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {vehicleError && (
+                <p className="text-xs text-red-500 mt-1">{vehicleError}</p>
+              )}
+            </div>
+
+            {/* ── Mission Control ─────────────────────────────────────── */}
             {/* Mission Control */}
             <div>
               <h2 className="text-xl font-bold text-slate-800 mb-4">Mission Control</h2>
@@ -601,110 +926,6 @@ export default function MissionPlanner() {
               )}
             </div>
 
-            {/* Metrics */}
-            <div>
-              <h3 className="text-lg font-bold text-slate-800 mb-1">Metrics</h3>
-              {/* Radio connection status */}
-              <div className="flex items-center gap-1.5 mb-3">
-                <span className={`w-2 h-2 rounded-full ${telemetry.connected ? 'bg-emerald-500 animate-pulse' : 'bg-red-400'}`} />
-                <span className="text-xs text-slate-500">
-                  {telemetry.connected ? 'SiK radio connected' : 'Radio disconnected'}
-                </span>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                {/* Battery */}
-                <div className="bg-gradient-to-br from-emerald-50 to-emerald-100 rounded-lg p-4 border border-emerald-200">
-                  <div className="flex items-center gap-2 mb-2">
-                    <Battery className="w-4 h-4 text-emerald-600" />
-                    <span className="text-xs font-semibold text-emerald-700 uppercase tracking-wide">
-                      Battery
-                    </span>
-                  </div>
-                  <div className="text-3xl font-bold text-emerald-700">—</div>
-                </div>
-
-                {/* Wind Speed — live from QS-FS sensor via Pixhawk */}
-                <div className="bg-gradient-to-br from-blue-50 to-blue-100 rounded-lg p-4 border border-blue-200">
-                  <div className="flex items-center gap-2 mb-2">
-                    <Wind className="w-4 h-4 text-blue-600" />
-                    <span className="text-xs font-semibold text-blue-700 uppercase tracking-wide">
-                      Wind Speed
-                    </span>
-                  </div>
-                  <div className="text-3xl font-bold text-blue-700">
-                    {telemetry.wind_speed_knots !== null
-                      ? <>{telemetry.wind_speed_knots.toFixed(1)}<span className="text-lg ml-1">kts</span></>
-                      : <span className="text-slate-400">—</span>}
-                  </div>
-                </div>
-
-                {/* Boat Speed — derived from GPS ground velocity */}
-                <div className="bg-gradient-to-br from-purple-50 to-purple-100 rounded-lg p-4 border border-purple-200">
-                  <div className="flex items-center gap-2 mb-2">
-                    <Gauge className="w-4 h-4 text-purple-600" />
-                    <span className="text-xs font-semibold text-purple-700 uppercase tracking-wide">
-                      Speed
-                    </span>
-                  </div>
-                  <div className="text-3xl font-bold text-purple-700">
-                    {telemetry.gps_speed_knots !== null
-                      ? <>{telemetry.gps_speed_knots.toFixed(1)}<span className="text-lg ml-1">kts</span></>
-                      : <span className="text-slate-400">—</span>}
-                  </div>
-                </div>
-
-                {/* Wind Direction — live from SN-FXJT05 vane via Pixhawk */}
-                <div className="bg-gradient-to-br from-sky-50 to-sky-100 rounded-lg p-4 border border-sky-200">
-                  <div className="flex items-center gap-2 mb-2">
-                    <Wind className="w-4 h-4 text-sky-600" />
-                    <span className="text-xs font-semibold text-sky-700 uppercase tracking-wide">
-                      Wind Dir
-                    </span>
-                  </div>
-                  {telemetry.wind_direction_deg !== null ? (
-                    <div className="flex items-center gap-2">
-                      <WindCompass deg={telemetry.wind_direction_deg} />
-                      <div>
-                        <div className="text-2xl font-bold text-sky-700">
-                          {Math.round(telemetry.wind_direction_deg)}°
-                        </div>
-                        <div className="text-sm font-semibold text-sky-500">
-                          {compassLabel(telemetry.wind_direction_deg)}
-                        </div>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="text-3xl font-bold text-slate-400">—</div>
-                  )}
-                </div>
-              </div>
-
-              {/* GPS Status */}
-              <div className="mt-3 bg-gradient-to-br from-slate-50 to-slate-100 rounded-lg p-4 border border-slate-200">
-                <div className="flex items-center justify-between mb-2">
-                  <div className="flex items-center gap-2">
-                    <MapPin className="w-4 h-4 text-slate-600" />
-                    <span className="text-xs font-semibold text-slate-700 uppercase tracking-wide">GPS</span>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <span className={`w-2 h-2 rounded-full ${
-                      telemetry.gps_fix ? 'bg-emerald-500 animate-pulse' : 'bg-red-400'
-                    }`} />
-                    <span className="text-xs text-slate-500">
-                      {telemetry.gps_fix ? 'Fix' : telemetry.gps_lat !== null ? 'Stale' : 'No fix'}
-                    </span>
-                  </div>
-                </div>
-                <div className="text-xs font-mono text-slate-600 space-y-0.5">
-                  <div>Lat: {telemetry.gps_lat !== null ? telemetry.gps_lat.toFixed(6) : '—'}</div>
-                  <div>Lng: {telemetry.gps_lon !== null ? telemetry.gps_lon.toFixed(6) : '—'}</div>
-                  {telemetry.gps_heading_deg !== null && (
-                    <div>Hdg: {telemetry.gps_heading_deg.toFixed(1)}°</div>
-                  )}
-                </div>
-              </div>
-            </div>
           </div>
         </div>
       </div>

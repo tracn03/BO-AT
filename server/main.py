@@ -9,6 +9,7 @@ from database import engine, Base
 from mavlink_connection import mavlink_conn
 from routers import missions
 from routers import telemetry
+from routers import vehicle
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -42,14 +43,15 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type"],
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.include_router(missions.router, prefix="/api/missions", tags=["missions"])
 app.include_router(telemetry.router, prefix="/api/telemetry", tags=["telemetry"])
+app.include_router(vehicle.router,   prefix="/api/vehicle",   tags=["vehicle"])
 
 
 @app.get("/api/health")

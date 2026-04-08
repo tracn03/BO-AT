@@ -20,11 +20,24 @@ logger = logging.getLogger(__name__)
 SERIAL_PORT = os.environ.get("MAVLINK_SERIAL_PORT", "/dev/cu.usbserial-DN05YS5Z")
 BAUD_RATE = 57600
 MS_TO_KNOTS = 1.94384
+# Wind vane is mounted 90° clockwise from the bow, so subtract to get true bearing
+WIND_SENSOR_OFFSET_DEG = 90
+
+# ArduRover custom mode IDs used for mode switching
+ROVER_MODES = {"MANUAL": 0, "HOLD": 4, "AUTO": 10}
+
+# Human-readable names for all ArduRover custom modes (for HEARTBEAT parsing)
+_ROVER_MODE_NAMES: Dict[int, str] = {
+    0: "MANUAL", 1: "ACRO", 3: "STEERING", 4: "HOLD",
+    5: "LOITER", 6: "FOLLOW", 10: "AUTO", 11: "RTL",
+    12: "SRTL", 15: "GUIDED", 16: "INIT",
+}
 
 # ArduRover MAVLink message IDs
 MAVLINK_MSG_ID_WIND = 168
 MAVLINK_MSG_ID_GLOBAL_POSITION_INT = 33
 MAVLINK_MSG_ID_ATTITUDE = 30
+MAVLINK_MSG_ID_SYS_STATUS = 1
 
 # GPS fix considered stale after this many seconds without a new message
 GPS_STALE_TIMEOUT = 5.0
@@ -60,6 +73,11 @@ class MAVLinkConnection:
             "pitch_deg": None,
             "yaw_deg": None,
             "capsized": False,
+            "battery_pct": None,
+            "battery_voltage_v": None,
+            "battery_current_a": None,
+            "armed": False,
+            "flight_mode": None,
         }
 
     # ------------------------------------------------------------------ #
@@ -175,6 +193,25 @@ class MAVLinkConnection:
                 0, 0, 0, 0, 0,
             )
 
+            # Request SYS_STATUS at 2 Hz for battery telemetry
+            self._connection.mav.command_long_send(
+                self._connection.target_system,
+                self._connection.target_component,
+                mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+                0,
+                MAVLINK_MSG_ID_SYS_STATUS,
+                500_000,  # interval in microseconds (2 Hz)
+                0, 0, 0, 0, 0,
+            )
+            # Fallback stream for older firmware
+            self._connection.mav.request_data_stream_send(
+                self._connection.target_system,
+                self._connection.target_component,
+                mavutil.mavlink.MAV_DATA_STREAM_EXTENDED_STATUS,
+                2,  # 2 Hz
+                1,  # start
+            )
+
             with self._lock:
                 self._data["connected"] = True
             return True
@@ -271,6 +308,86 @@ class MAVLinkConnection:
             finally:
                 self._upload_paused.clear()
 
+    def arm(self, do_arm: bool, force: bool = False) -> Dict[str, Any]:
+        """
+        Arm or disarm the vehicle.
+        force=True bypasses pre-arm checks (ArduPilot magic param2=21196).
+        Pauses the read loop while waiting for COMMAND_ACK.
+        """
+        if not self._connection:
+            return {"success": False, "message": "Not connected to Pixhawk"}
+
+        with self._upload_lock:
+            self._upload_paused.set()
+            time.sleep(0.1)
+            try:
+                self._connection.mav.command_long_send(
+                    self._connection.target_system,
+                    self._connection.target_component,
+                    mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                    0,
+                    1 if do_arm else 0,
+                    21196 if (force and do_arm) else 0,  # ArduPilot force-arm bypass
+                    0, 0, 0, 0, 0,
+                )
+                ack = self._connection.recv_match(
+                    type="COMMAND_ACK", blocking=True, timeout=3.0
+                )
+                if ack and ack.result == mavutil.mavlink.MAV_RESULT_ACCEPTED:
+                    label = "Force armed" if force else ("Armed" if do_arm else "Disarmed")
+                    return {"success": True, "message": label}
+                code = ack.result if ack else "timeout"
+                return {
+                    "success": False,
+                    "message": f"Command {'rejected' if ack else 'timed out'} (code {code})",
+                }
+            except Exception as exc:
+                logger.error("Arm/disarm error: %s", exc)
+                return {"success": False, "message": str(exc)}
+            finally:
+                self._upload_paused.clear()
+
+    def set_mode(self, mode_name: str) -> Dict[str, Any]:
+        """
+        Set the vehicle flight mode to one of the ROVER_MODES keys.
+        Pauses the read loop while waiting for COMMAND_ACK.
+        """
+        if not self._connection:
+            return {"success": False, "message": "Not connected to Pixhawk"}
+
+        custom_mode = ROVER_MODES.get(mode_name)
+        if custom_mode is None:
+            return {"success": False, "message": f"Unknown mode '{mode_name}'"}
+
+        with self._upload_lock:
+            self._upload_paused.set()
+            time.sleep(0.1)
+            try:
+                self._connection.mav.command_long_send(
+                    self._connection.target_system,
+                    self._connection.target_component,
+                    mavutil.mavlink.MAV_CMD_DO_SET_MODE,
+                    0,
+                    mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                    custom_mode,
+                    0, 0, 0, 0, 0,
+                )
+                ack = self._connection.recv_match(
+                    type="COMMAND_ACK", blocking=True, timeout=3.0
+                )
+                if ack and ack.result == mavutil.mavlink.MAV_RESULT_ACCEPTED:
+                    return {"success": True, "message": f"Mode set to {mode_name}"}
+                code = ack.result if ack else "timeout"
+                return {
+                    "success": False,
+                    "message": f"Mode change {'rejected' if ack else 'timed out'} (code {code})",
+                }
+            except Exception as exc:
+                logger.error("Set mode error: %s", exc)
+                return {"success": False, "message": str(exc)}
+            finally:
+                self._upload_paused.clear()
+
     def _read_loop(self):
         """Background thread: parse incoming MAVLink messages."""
         while self._running.is_set():
@@ -285,7 +402,7 @@ class MAVLinkConnection:
             try:
                 msg = self._connection.recv_match(
                     type=["WIND", "HEARTBEAT", "MISSION_CURRENT", "MISSION_ITEM_REACHED",
-                          "GLOBAL_POSITION_INT", "ATTITUDE"],
+                          "GLOBAL_POSITION_INT", "ATTITUDE", "SYS_STATUS"],
                     blocking=True,
                     timeout=2.0,
                 )
@@ -302,14 +419,24 @@ class MAVLinkConnection:
                                 # speed is m/s from the modified firmware; convert to knots
                                 "wind_speed_knots": round(msg.speed * MS_TO_KNOTS, 2),
                                 # direction: degrees the wind is coming FROM (0 = N)
-                                "wind_direction_deg": round(msg.direction % 360, 1),
+                                # subtract mounting offset to correct for sensor orientation
+                                "wind_direction_deg": round((msg.direction - WIND_SENSOR_OFFSET_DEG) % 360, 1),
                                 "timestamp": time.time(),
                             }
                         )
 
                 elif msg_type == "HEARTBEAT":
+                    # Ignore heartbeats from GCS/ourselves; only process the autopilot's
+                    if msg.get_srcSystem() != self._connection.target_system:
+                        continue
                     with self._lock:
                         self._data["connected"] = True
+                        self._data["armed"] = bool(
+                            msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
+                        )
+                        self._data["flight_mode"] = _ROVER_MODE_NAMES.get(
+                            msg.custom_mode, f"MODE_{msg.custom_mode}"
+                        )
 
                 elif msg_type == "MISSION_CURRENT":
                     with self._lock:
@@ -317,6 +444,18 @@ class MAVLinkConnection:
 
                 elif msg_type == "MISSION_ITEM_REACHED":
                     logger.info("Waypoint seq=%d reached.", msg.seq)
+
+                elif msg_type == "SYS_STATUS":
+                    with self._lock:
+                        # voltage_battery: mV, UINT16_MAX (65535) = unknown
+                        v = msg.voltage_battery
+                        # current_battery: 10 mA units, -1 = not measured
+                        c = msg.current_battery
+                        # battery_remaining: %, -1 = not estimated
+                        pct = msg.battery_remaining
+                        self._data["battery_voltage_v"] = None if v == 65535 else round(v / 1000.0, 2)
+                        self._data["battery_current_a"] = None if c < 0 else round(c / 100.0, 2)
+                        self._data["battery_pct"] = None if pct < 0 else int(pct)
 
                 elif msg_type == "ATTITUDE":
                     with self._lock:
