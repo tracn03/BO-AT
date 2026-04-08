@@ -58,6 +58,10 @@ export default function MapComponent({ waypoints, onMapClick, onWaypointRemove, 
   const arrowsRef = useRef<L.Polyline[]>([]);
   const vesselMarkerRef = useRef<L.Marker | null>(null);
 
+  // Keep a stable ref to onMapClick so the map-init closure never goes stale
+  const onMapClickRef = useRef(onMapClick);
+  useEffect(() => { onMapClickRef.current = onMapClick; }, [onMapClick]);
+
   // Initialize map
   useEffect(() => {
     if (!mapContainerRef.current || mapRef.current) return;
@@ -73,7 +77,7 @@ export default function MapComponent({ waypoints, onMapClick, onWaypointRemove, 
     }).addTo(map);
 
     map.on('click', (e) => {
-      onMapClick(e.latlng.lat, e.latlng.lng);
+      onMapClickRef.current(e.latlng.lat, e.latlng.lng);
     });
 
     mapRef.current = map;
@@ -191,77 +195,103 @@ export default function MapComponent({ waypoints, onMapClick, onWaypointRemove, 
       });
 
       // Calculate distance to next waypoint if exists
-      let distanceText = '';
+      let distanceDisplay = '';
       if (index < waypoints.length - 1) {
         const nextWp = waypoints[index + 1];
         const distance = calculateDistance(wp.lat, wp.lng, nextWp.lat, nextWp.lng);
-        if (distance < 1000) {
-          distanceText = `<div style="margin-top: 4px; font-size: 11px; color: #64748b;">
-            Next: ${Math.round(distance)}m
-          </div>`;
-        } else {
-          distanceText = `<div style="margin-top: 4px; font-size: 11px; color: #64748b;">
-            Next: ${(distance / 1000).toFixed(2)}km
-          </div>`;
-        }
+        distanceDisplay = distance < 1000
+          ? `Next: ${Math.round(distance)}m`
+          : `Next: ${(distance / 1000).toFixed(2)}km`;
       }
+
+      // Build popup content using DOM nodes — no HTML string interpolation
+      const container = L.DomUtil.create('div');
+      Object.assign(container.style, {
+        fontFamily: 'system-ui, sans-serif',
+        padding: '4px',
+        minWidth: '150px',
+      });
+
+      // Header row: colored circle + label
+      const header = L.DomUtil.create('div', '', container);
+      Object.assign(header.style, {
+        display: 'flex',
+        alignItems: 'center',
+        gap: '8px',
+        marginBottom: '8px',
+      });
+
+      const circle = L.DomUtil.create('div', '', header);
+      Object.assign(circle.style, {
+        width: '24px',
+        height: '24px',
+        background: markerColor,
+        borderRadius: '50%',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        color: 'white',
+        fontWeight: 'bold',
+        fontSize: '12px',
+      });
+      circle.textContent = String(wp.order);
+
+      const label = L.DomUtil.create('strong', '', header);
+      Object.assign(label.style, { color: '#1e293b', fontSize: '14px' });
+      label.textContent =
+        index === 0 && waypoints.length > 1 ? 'Start Point' :
+        index === waypoints.length - 1 && waypoints.length > 1 ? 'End Point' :
+        `Waypoint ${wp.order}`;
+
+      // Lat/lng display
+      const coords = L.DomUtil.create('div', '', container);
+      Object.assign(coords.style, {
+        marginTop: '4px',
+        fontSize: '12px',
+        color: '#64748b',
+        fontFamily: 'monospace',
+      });
+      const latLine = L.DomUtil.create('div', '', coords);
+      latLine.textContent = `Lat: ${wp.lat.toFixed(6)}`;
+      const lngLine = L.DomUtil.create('div', '', coords);
+      lngLine.textContent = `Lng: ${wp.lng.toFixed(6)}`;
+
+      // Distance to next waypoint
+      if (distanceDisplay) {
+        const distEl = L.DomUtil.create('div', '', container);
+        Object.assign(distEl.style, { marginTop: '4px', fontSize: '11px', color: '#64748b' });
+        distEl.textContent = distanceDisplay;
+      }
+
+      // Remove button — event attached via L.DomEvent, no inline onclick
+      const removeBtn = L.DomUtil.create('button', '', container);
+      Object.assign(removeBtn.style, {
+        marginTop: '8px',
+        width: '100%',
+        background: '#ef4444',
+        color: 'white',
+        border: 'none',
+        padding: '6px 12px',
+        borderRadius: '6px',
+        fontSize: '12px',
+        fontWeight: '600',
+        cursor: 'pointer',
+      });
+      removeBtn.textContent = 'Remove Waypoint';
+      removeBtn.addEventListener('mouseover', () => { removeBtn.style.background = '#dc2626'; });
+      removeBtn.addEventListener('mouseout', () => { removeBtn.style.background = '#ef4444'; });
+      L.DomEvent.on(removeBtn, 'click', () => { onWaypointRemove(wp.id); });
 
       const marker = L.marker([wp.lat, wp.lng], { icon })
         .addTo(map)
-        .bindPopup(`
-          <div style="font-family: system-ui, sans-serif; padding: 4px; min-width: 150px;">
-            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
-              <div style="
-                width: 24px;
-                height: 24px;
-                background: ${markerColor};
-                border-radius: 50%;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                color: white;
-                font-weight: bold;
-                font-size: 12px;
-              ">${wp.order}</div>
-              <strong style="color: #1e293b; font-size: 14px;">
-                ${index === 0 && waypoints.length > 1 ? 'Start Point' : 
-                  index === waypoints.length - 1 && waypoints.length > 1 ? 'End Point' : 
-                  `Waypoint ${wp.order}`}
-              </strong>
-            </div>
-            <div style="margin-top: 4px; font-size: 12px; color: #64748b; font-family: monospace;">
-              <div>Lat: ${wp.lat.toFixed(6)}</div>
-              <div>Lng: ${wp.lng.toFixed(6)}</div>
-            </div>
-            ${distanceText}
-            <button 
-              onclick="window.removeWaypoint('${wp.id}')"
-              style="
-                margin-top: 8px;
-                width: 100%;
-                background: #ef4444;
-                color: white;
-                border: none;
-                padding: 6px 12px;
-                border-radius: 6px;
-                font-size: 12px;
-                font-weight: 600;
-                cursor: pointer;
-              "
-              onmouseover="this.style.background='#dc2626'"
-              onmouseout="this.style.background='#ef4444'"
-            >
-              Remove Waypoint
-            </button>
-          </div>
-        `);
+        .bindPopup(container);
 
       markersRef.current[wp.id] = marker;
     });
 
     if (waypoints.length > 1) {
       const coordinates = waypoints.map(wp => [wp.lat, wp.lng] as [number, number]);
-      
+
       polylineRef.current = L.polyline(coordinates, {
         color: '#3b82f6',
         weight: 4,
@@ -269,15 +299,7 @@ export default function MapComponent({ waypoints, onMapClick, onWaypointRemove, 
         lineJoin: 'round',
         lineCap: 'round'
       }).addTo(map);
-
-
     }
-
-    (window as any).removeWaypoint = onWaypointRemove;
-
-    return () => {
-      delete (window as any).removeWaypoint;
-    };
   }, [waypoints, onWaypointRemove, activeWaypointOrder]);
 
   return (

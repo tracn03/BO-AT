@@ -8,6 +8,7 @@ mission upload protocol.
 """
 
 import math
+import os
 import threading
 import time
 import logging
@@ -16,7 +17,7 @@ from pymavlink import mavutil
 
 logger = logging.getLogger(__name__)
 
-SERIAL_PORT = "/dev/cu.usbserial-DN05YS5Z"
+SERIAL_PORT = os.environ.get("MAVLINK_SERIAL_PORT", "/dev/cu.usbserial-DN05YS5Z")
 BAUD_RATE = 57600
 MS_TO_KNOTS = 1.94384
 
@@ -37,8 +38,9 @@ class MAVLinkConnection:
     def __init__(self):
         self._connection: Optional[mavutil.mavfile] = None
         self._thread: Optional[threading.Thread] = None
-        self._running = False
+        self._running = threading.Event()
         self._lock = threading.Lock()
+        self._upload_lock = threading.Lock()
         self._upload_paused = threading.Event()
         self._gps_last_update: Optional[float] = None
         self._capsize_start: Optional[float] = None  # time roll first exceeded threshold
@@ -55,6 +57,8 @@ class MAVLinkConnection:
             "gps_heading_deg": None,
             "gps_speed_knots": None,
             "roll_deg": None,
+            "pitch_deg": None,
+            "yaw_deg": None,
             "capsized": False,
         }
 
@@ -66,7 +70,7 @@ class MAVLinkConnection:
         """Connect and start the background reader thread."""
         if not self._connect():
             return False
-        self._running = True
+        self._running.set()
         self._thread = threading.Thread(
             target=self._read_loop, daemon=True, name="mavlink-reader"
         )
@@ -75,7 +79,7 @@ class MAVLinkConnection:
 
     def stop(self):
         """Stop the reader and close the connection."""
-        self._running = False
+        self._running.clear()
         if self._connection:
             try:
                 self._connection.close()
@@ -196,79 +200,80 @@ class MAVLinkConnection:
         if count == 0:
             return {"success": False, "message": "No waypoints to upload"}
 
-        # Signal the read loop to yield, then wait briefly for it to do so
-        self._upload_paused.set()
-        time.sleep(0.15)
+        with self._upload_lock:
+            # Signal the read loop to yield, then wait briefly for it to do so
+            self._upload_paused.set()
+            time.sleep(0.15)
 
-        try:
-            target_sys = self._connection.target_system
-            target_comp = self._connection.target_component
+            try:
+                target_sys = self._connection.target_system
+                target_comp = self._connection.target_component
 
-            logger.info("Uploading %d waypoints to system %d...", count, target_sys)
-            self._connection.mav.mission_count_send(target_sys, target_comp, count)
+                logger.info("Uploading %d waypoints to system %d...", count, target_sys)
+                self._connection.mav.mission_count_send(target_sys, target_comp, count)
 
-            while True:
-                msg = self._connection.recv_match(
-                    type=["MISSION_REQUEST", "MISSION_REQUEST_INT", "MISSION_ACK"],
-                    blocking=True,
-                    timeout=5.0,
-                )
-                if msg is None:
-                    return {"success": False, "message": "Timeout waiting for Pixhawk response"}
-
-                msg_type = msg.get_type()
-
-                if msg_type == "MISSION_ACK":
-                    if msg.type == mavutil.mavlink.MAV_MISSION_ACCEPTED:
-                        logger.info("Mission upload accepted by Pixhawk.")
-                        with self._lock:
-                            self._data["mission_count"] = count
-                        return {"success": True, "message": f"Uploaded {count} waypoints successfully"}
-                    else:
-                        return {"success": False, "message": f"Mission upload rejected by Pixhawk (code {msg.type})"}
-
-                if msg_type in ("MISSION_REQUEST", "MISSION_REQUEST_INT"):
-                    seq = msg.seq
-                    if seq >= count:
-                        return {
-                            "success": False,
-                            "message": f"Pixhawk requested seq {seq} but only {count} waypoints exist",
-                        }
-
-                    wp = waypoints[seq]
-                    # Waypoint 0 is always home — must use absolute frame (MAV_FRAME_GLOBAL = 0)
-                    is_home = seq == 0
-                    frame = 0 if is_home else int(wp.get("frame", 3))
-
-                    self._connection.mav.mission_item_int_send(
-                        target_sys,
-                        target_comp,
-                        seq,
-                        frame,
-                        int(wp.get("command", 16)),
-                        1 if is_home else 0,        # current (1 = home)
-                        int(wp.get("autocontinue", 1)),
-                        float(wp.get("param1", 0.0)),
-                        float(wp.get("param2", 2.0)),
-                        float(wp.get("param3", 0.0)),
-                        float(wp.get("param4", 0.0)),
-                        int(float(wp["latitude"]) * 1e7),
-                        int(float(wp["longitude"]) * 1e7),
-                        float(wp.get("altitude", 0.0)),
-                        mavutil.mavlink.MAV_MISSION_TYPE_MISSION,
+                while True:
+                    msg = self._connection.recv_match(
+                        type=["MISSION_REQUEST", "MISSION_REQUEST_INT", "MISSION_ACK"],
+                        blocking=True,
+                        timeout=5.0,
                     )
-                    logger.debug("Sent MISSION_ITEM_INT seq=%d", seq)
+                    if msg is None:
+                        return {"success": False, "message": "Timeout waiting for Pixhawk response"}
 
-        except Exception as exc:
-            logger.error("Mission upload error: %s", exc)
-            return {"success": False, "message": f"Upload error: {exc}"}
+                    msg_type = msg.get_type()
 
-        finally:
-            self._upload_paused.clear()
+                    if msg_type == "MISSION_ACK":
+                        if msg.type == mavutil.mavlink.MAV_MISSION_ACCEPTED:
+                            logger.info("Mission upload accepted by Pixhawk.")
+                            with self._lock:
+                                self._data["mission_count"] = count
+                            return {"success": True, "message": f"Uploaded {count} waypoints successfully"}
+                        else:
+                            return {"success": False, "message": f"Mission upload rejected by Pixhawk (code {msg.type})"}
+
+                    if msg_type in ("MISSION_REQUEST", "MISSION_REQUEST_INT"):
+                        seq = msg.seq
+                        if seq >= count:
+                            return {
+                                "success": False,
+                                "message": f"Pixhawk requested seq {seq} but only {count} waypoints exist",
+                            }
+
+                        wp = waypoints[seq]
+                        # Waypoint 0 is always home — must use absolute frame (MAV_FRAME_GLOBAL = 0)
+                        is_home = seq == 0
+                        frame = 0 if is_home else int(wp.get("frame", 3))
+
+                        self._connection.mav.mission_item_int_send(
+                            target_sys,
+                            target_comp,
+                            seq,
+                            frame,
+                            int(wp.get("command", 16)),
+                            1 if is_home else 0,        # current (1 = home)
+                            int(wp.get("autocontinue", 1)),
+                            float(wp.get("param1", 0.0)),
+                            float(wp.get("param2", 2.0)),
+                            float(wp.get("param3", 0.0)),
+                            float(wp.get("param4", 0.0)),
+                            int(float(wp["latitude"]) * 1e7),
+                            int(float(wp["longitude"]) * 1e7),
+                            float(wp.get("altitude", 0.0)),
+                            mavutil.mavlink.MAV_MISSION_TYPE_MISSION,
+                        )
+                        logger.debug("Sent MISSION_ITEM_INT seq=%d", seq)
+
+            except Exception as exc:
+                logger.error("Mission upload error: %s", exc)
+                return {"success": False, "message": f"Upload error: {exc}"}
+
+            finally:
+                self._upload_paused.clear()
 
     def _read_loop(self):
         """Background thread: parse incoming MAVLink messages."""
-        while self._running:
+        while self._running.is_set():
             # Yield while a mission upload is in progress
             if self._upload_paused.is_set():
                 time.sleep(0.1)
@@ -314,17 +319,22 @@ class MAVLinkConnection:
                     logger.info("Waypoint seq=%d reached.", msg.seq)
 
                 elif msg_type == "ATTITUDE":
-                    roll_deg = round(math.degrees(msg.roll), 1)
-                    now = time.time()
-                    if abs(roll_deg) >= CAPSIZE_ROLL_THRESHOLD_DEG:
-                        if self._capsize_start is None:
-                            self._capsize_start = now
-                        capsized = (now - self._capsize_start) >= CAPSIZE_SUSTAIN_SECS
-                    else:
-                        self._capsize_start = None
-                        capsized = False
                     with self._lock:
+                        roll_deg = round(math.degrees(msg.roll), 1)
+                        pitch_deg = round(math.degrees(msg.pitch), 1)
+                        # yaw: -π..π (0=N, positive=CW) → 0–360° compass bearing
+                        yaw_deg = round(math.degrees(msg.yaw) % 360, 1)
+                        now = time.time()
+                        if abs(roll_deg) >= CAPSIZE_ROLL_THRESHOLD_DEG:
+                            if self._capsize_start is None:
+                                self._capsize_start = now
+                            capsized = (now - self._capsize_start) >= CAPSIZE_SUSTAIN_SECS
+                        else:
+                            self._capsize_start = None
+                            capsized = False
                         self._data["roll_deg"] = roll_deg
+                        self._data["pitch_deg"] = pitch_deg
+                        self._data["yaw_deg"] = yaw_deg
                         self._data["capsized"] = capsized
 
                 elif msg_type == "GLOBAL_POSITION_INT":

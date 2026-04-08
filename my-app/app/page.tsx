@@ -21,6 +21,8 @@ interface TelemetryData {
   gps_speed_knots: number | null;
   gps_fix: boolean;
   roll_deg: number | null;
+  pitch_deg: number | null;
+  yaw_deg: number | null;
   capsized: boolean;
 }
 
@@ -49,6 +51,127 @@ function WindCompass({ deg }: { deg: number }) {
         <line x1="32" y1="22" x2="32" y2="50" stroke="#93c5fd" strokeWidth="2" strokeLinecap="round" />
       </g>
     </svg>
+  );
+}
+
+/** SVG artificial horizon / attitude indicator showing roll and pitch. */
+function AttitudeIndicator({ roll, pitch }: { roll: number; pitch: number }) {
+  const cx = 100, cy = 100, r = 88;
+  const pitchPx = 2.4; // pixels per degree of pitch
+
+  // Point on arc at `deg` degrees from 12-o'clock at `rad` radius
+  const arcPt = (deg: number, rad: number): [number, number] => [
+    cx + rad * Math.sin((deg * Math.PI) / 180),
+    cy - rad * Math.cos((deg * Math.PI) / 180),
+  ];
+
+  const arcR = 74;
+
+  // [pitch degrees, half-width in px] – gaps at centre so symbol stays readable
+  const pitchLines: Array<[number, number]> = [
+    [30, 36], [20, 27], [10, 18], [-10, 18], [-20, 27], [-30, 36],
+  ];
+
+  // [roll scale angle, tick length]
+  const rollTicks: Array<[number, number]> = [
+    [-60, 5], [-45, 4], [-30, 8], [-20, 4], [-10, 4],
+    [0, 9], [10, 4], [20, 4], [30, 8], [45, 4], [60, 5],
+  ];
+
+  const [ax1, ay1] = arcPt(-60, arcR);
+  const [ax2, ay2] = arcPt(60, arcR);
+
+  return (
+    <svg viewBox="0 0 200 200" className="w-full h-full" aria-label={`Roll ${roll}° Pitch ${pitch}°`}>
+      <defs>
+        <clipPath id="ai-clip">
+          <circle cx={cx} cy={cy} r={r} />
+        </clipPath>
+      </defs>
+
+      {/* ── Moving sphere: rotates for roll, translates for pitch ── */}
+      <g clipPath="url(#ai-clip)" transform={`rotate(${-roll} ${cx} ${cy})`}>
+        <g transform={`translate(0 ${pitch * pitchPx})`}>
+          {/* Sky */}
+          <rect x="-100" y="-300" width="400" height="400" fill="#1a56c5" />
+          {/* Ground */}
+          <rect x="-100" y="100" width="400" height="300" fill="#7b5044" />
+          {/* Horizon line */}
+          <line x1="-100" y1="100" x2="300" y2="100" stroke="white" strokeWidth="1.5" />
+          {/* Pitch graduation lines */}
+          {pitchLines.map(([deg, hw]) => {
+            const y = 100 - deg * pitchPx;
+            return (
+              <g key={deg}>
+                <line x1={cx - hw} y1={y} x2={cx - 5} y2={y} stroke="white" strokeWidth="1" opacity="0.75" />
+                <line x1={cx + 5} y1={y} x2={cx + hw} y2={y} stroke="white" strokeWidth="1" opacity="0.75" />
+                <text x={cx + hw + 3} y={y + 3.5} fontSize="6" fill="white" opacity="0.6">{Math.abs(deg)}</text>
+                <text x={cx - hw - 3} y={y + 3.5} fontSize="6" fill="white" opacity="0.6" textAnchor="end">{Math.abs(deg)}</text>
+              </g>
+            );
+          })}
+        </g>
+      </g>
+
+      {/* ── Fixed roll scale arc (–60° to +60°) ── */}
+      <path
+        d={`M ${ax1.toFixed(2)} ${ay1.toFixed(2)} A ${arcR} ${arcR} 0 0 1 ${ax2.toFixed(2)} ${ay2.toFixed(2)}`}
+        fill="none" stroke="rgba(255,255,255,0.4)" strokeWidth="1"
+      />
+      {rollTicks.map(([deg, len]) => {
+        const [ox, oy] = arcPt(deg, arcR);
+        const [ix, iy] = arcPt(deg, arcR - len);
+        return (
+          <line key={deg} x1={ox} y1={oy} x2={ix} y2={iy}
+            stroke="rgba(255,255,255,0.65)"
+            strokeWidth={deg === 0 || Math.abs(deg) === 30 ? 1.5 : 1}
+          />
+        );
+      })}
+
+      {/* ── Moving bank-angle pointer (rotates by roll) ── */}
+      <g transform={`rotate(${roll} ${cx} ${cy})`}>
+        <polygon
+          points={`${cx},${cy - arcR - 6} ${cx - 5},${cy - arcR + 3} ${cx + 5},${cy - arcR + 3}`}
+          fill="white" opacity="0.92"
+        />
+      </g>
+
+      {/* ── Fixed aircraft symbol ── */}
+      <line x1={cx - 36} y1={cy} x2={cx - 10} y2={cy} stroke="#fbbf24" strokeWidth="3.5" strokeLinecap="round" />
+      <line x1={cx - 10} y1={cy} x2={cx - 10} y2={cy + 6} stroke="#fbbf24" strokeWidth="3.5" strokeLinecap="round" />
+      <line x1={cx + 10} y1={cy} x2={cx + 36} y2={cy} stroke="#fbbf24" strokeWidth="3.5" strokeLinecap="round" />
+      <line x1={cx + 10} y1={cy} x2={cx + 10} y2={cy + 6} stroke="#fbbf24" strokeWidth="3.5" strokeLinecap="round" />
+      <circle cx={cx} cy={cy} r={4} fill="#fbbf24" />
+
+      {/* ── Bezel ── */}
+      <circle cx={cx} cy={cy} r={r} fill="none" stroke="#0f172a" strokeWidth="5" />
+      <circle cx={cx} cy={cy} r={r - 1.5} fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth="1" />
+    </svg>
+  );
+}
+
+/** Single orientation readout (label + value). */
+function OrientationReadout({ label, value, sign = false, yaw = false }: {
+  label: string; value: number | null; sign?: boolean; yaw?: boolean;
+}) {
+  let display: string;
+  if (value === null) {
+    display = '—';
+  } else if (yaw) {
+    display = `${Math.round(value)}°`;
+  } else {
+    const prefix = sign && value > 0 ? '+' : '';
+    display = `${prefix}${value.toFixed(1)}°`;
+  }
+  return (
+    <div>
+      <div className="text-xs text-slate-500 uppercase tracking-widest mb-0.5">{label}</div>
+      <div className="text-xl font-bold text-white font-mono leading-tight tabular-nums">{display}</div>
+      {yaw && value !== null && (
+        <div className="text-xs text-slate-400 font-semibold mt-0.5">{compassLabel(value)}</div>
+      )}
+    </div>
   );
 }
 
@@ -91,6 +214,8 @@ export default function MissionPlanner() {
     gps_speed_knots: null,
     gps_fix: false,
     roll_deg: null,
+    pitch_deg: null,
+    yaw_deg: null,
     capsized: false,
   });
   const [isUploading, setIsUploading] = useState(false);
@@ -113,7 +238,8 @@ export default function MissionPlanner() {
 
       ws.onclose = () => {
         setTelemetry(prev => ({ ...prev, connected: false }));
-        // Auto-reconnect after 3 s
+        // Auto-reconnect after 3 s; clear any pending timer first to avoid leaks
+        if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
         reconnectTimer.current = setTimeout(connect, 3000);
       };
 
@@ -133,18 +259,16 @@ export default function MissionPlanner() {
   const handleMapClick = (lat: number, lng: number) => {
     setWaypoints(prevWaypoints => {
       const newWaypoint: Waypoint = {
-        id: `wp-${Date.now()}`,
+        id: crypto.randomUUID(),
         lat,
         lng,
         order: prevWaypoints.length + 1
       };
-      console.log('Added waypoint:', newWaypoint);
-      console.log('Total waypoints:', prevWaypoints.length + 1);
       return [...prevWaypoints, newWaypoint];
     });
   };
 
-  const handleStartMission = async () => {
+  async function runUpload(setRunning: boolean) {
     if (waypoints.length === 0) return;
     setIsUploading(true);
     setApiError(null);
@@ -156,36 +280,18 @@ export default function MissionPlanner() {
       });
       setSavedMissionId(mission.id);
       await uploadMissionToPixhawk(mission.id);
-      setStatus('running');
+      if (setRunning) setStatus('running');
       setUploadSuccess(true);
       setTimeout(() => setUploadSuccess(false), 3000);
     } catch (err) {
-      setApiError(err instanceof Error ? err.message : 'Mission start failed');
+      setApiError(err instanceof Error ? err.message : setRunning ? 'Mission start failed' : 'Re-upload failed');
     } finally {
       setIsUploading(false);
     }
-  };
+  }
 
-  const handleReupload = async () => {
-    if (waypoints.length === 0) return;
-    setIsUploading(true);
-    setApiError(null);
-    setUploadSuccess(false);
-    try {
-      const mission = await saveMission({
-        name: missionName,
-        waypoints: waypoints.map(wp => ({ latitude: wp.lat, longitude: wp.lng })),
-      });
-      setSavedMissionId(mission.id);
-      await uploadMissionToPixhawk(mission.id);
-      setUploadSuccess(true);
-      setTimeout(() => setUploadSuccess(false), 3000);
-    } catch (err) {
-      setApiError(err instanceof Error ? err.message : 'Re-upload failed');
-    } finally {
-      setIsUploading(false);
-    }
-  };
+  const handleStartMission = () => runUpload(true);
+  const handleReupload = () => runUpload(false);
 
   const handleSaveMission = async () => {
     if (waypoints.length === 0) return;
@@ -222,19 +328,12 @@ export default function MissionPlanner() {
     setStatus('idle');
     setSavedMissionId(null);
     setApiError(null);
-    console.log('Reset all waypoints');
   };
 
   const removeWaypoint = (id: string) => {
     setWaypoints(prevWaypoints => {
       const filtered = prevWaypoints.filter(wp => wp.id !== id);
-      const reordered = filtered.map((wp, index) => ({
-        ...wp,
-        order: index + 1
-      }));
-      console.log('Removed waypoint:', id);
-      console.log('Remaining waypoints:', reordered.length);
-      return reordered;
+      return filtered.map((wp, index) => ({ ...wp, order: index + 1 }));
     });
   };
 
@@ -278,19 +377,47 @@ export default function MissionPlanner() {
 
       {/* Main Content */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Map Section */}
-        <div className="flex-1 relative">
-          <MapComponent
-            waypoints={waypoints}
-            onMapClick={handleMapClick}
-            onWaypointRemove={removeWaypoint}
-            activeWaypointOrder={
-              status === 'running' && telemetry.current_waypoint_seq !== null
-                ? telemetry.current_waypoint_seq + 1
-                : undefined
-            }
-            vesselPosition={vesselPosition}
-          />
+        {/* Left column: map + orientation panel */}
+        <div className="flex-1 flex flex-col overflow-hidden">
+          <div className="flex-1 relative min-h-0">
+            <MapComponent
+              waypoints={waypoints}
+              onMapClick={handleMapClick}
+              onWaypointRemove={removeWaypoint}
+              activeWaypointOrder={
+                status === 'running' && telemetry.current_waypoint_seq !== null
+                  ? telemetry.current_waypoint_seq + 1
+                  : undefined
+              }
+              vesselPosition={vesselPosition}
+            />
+          </div>
+
+          {/* Orientation panel */}
+          <div className="h-48 bg-slate-950 border-t border-slate-800 flex items-center gap-6 px-6 flex-shrink-0">
+            {/* Attitude indicator */}
+            <div className="w-36 h-36 flex-shrink-0">
+              {telemetry.roll_deg !== null && telemetry.pitch_deg !== null ? (
+                <AttitudeIndicator roll={telemetry.roll_deg} pitch={telemetry.pitch_deg} />
+              ) : (
+                <div className="w-full h-full rounded-full border border-slate-800 flex items-center justify-center">
+                  <span className="text-slate-600 text-xs">No signal</span>
+                </div>
+              )}
+            </div>
+
+            {/* Readouts */}
+            <div className="flex flex-col gap-1">
+              <div className="text-xs font-semibold text-slate-500 uppercase tracking-widest mb-2">
+                Orientation
+              </div>
+              <div className="grid grid-cols-3 gap-6">
+                <OrientationReadout label="Roll"  value={telemetry.roll_deg}  sign />
+                <OrientationReadout label="Pitch" value={telemetry.pitch_deg} sign />
+                <OrientationReadout label="Yaw"   value={telemetry.yaw_deg}   yaw />
+              </div>
+            </div>
+          </div>
         </div>
 
         {/* Control Panel */}

@@ -1,8 +1,9 @@
+import re
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime
 
 from database import get_db
@@ -13,9 +14,9 @@ from mavlink_connection import mavlink_conn
 router = APIRouter()
 
 class WaypointIn(BaseModel):
-    latitude: float
-    longitude: float
-    altitude: float = 0.0
+    latitude: float = Field(..., ge=-90, le=90)
+    longitude: float = Field(..., ge=-180, le=180)
+    altitude: float = Field(0.0, ge=-500, le=50000)
     command: int = 16          # MAV_CMD_NAV_WAYPOINT
     frame: int = 3             # MAV_FRAME_GLOBAL_RELATIVE_ALT
     param1: float = 0.0
@@ -34,9 +35,9 @@ class WaypointOut(WaypointIn):
 
 
 class MissionCreate(BaseModel):
-    name: str
-    description: Optional[str] = None
-    waypoints: List[WaypointIn]
+    name: str = Field(..., min_length=1, max_length=255)
+    description: Optional[str] = Field(None, max_length=1000)
+    waypoints: List[WaypointIn] = Field(..., min_length=1, max_length=500)
 
 
 class MissionOut(BaseModel):
@@ -69,9 +70,6 @@ def create_mission(payload: MissionCreate, db: Session = Depends(get_db)):
     Save a new mission with its waypoints to the database.
     The first waypoint is treated as home; all others are mission waypoints.
     """
-    if not payload.waypoints:
-        raise HTTPException(status_code=422, detail="A mission must have at least one waypoint.")
-
     mission = Mission(name=payload.name, description=payload.description)
     db.add(mission)
     db.flush()  # Get the mission.id before inserting waypoints
@@ -173,7 +171,8 @@ def export_mission_waypoints(mission_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=422, detail="Mission has no waypoints to export.")
 
     file_content = generate_waypoints_file(sorted(mission.waypoints, key=lambda w: w.sequence))
-    filename = mission.name.replace(" ", "_").lower()
+    safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', mission.name)
+    filename = safe_name.lower()
 
     return PlainTextResponse(
         content=file_content,
